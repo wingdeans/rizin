@@ -31,6 +31,7 @@
 #include <rz_crypto.h>
 #include <rz_bind.h>
 #include <rz_util/rz_annotated_code.h>
+#include "rz_heap_glibc.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -52,19 +53,21 @@ RZ_LIB_VERSION_HEADER(rz_core);
 #define RZ_CORE_ANALYSIS_JSON_FORMAT_DISASM 32
 #define RZ_CORE_ANALYSIS_STAR               64
 
-#define RZ_FLAGS_FS_CLASSES          "classes"
-#define RZ_FLAGS_FS_FUNCTIONS        "functions"
-#define RZ_FLAGS_FS_IMPORTS          "imports"
-#define RZ_FLAGS_FS_RELOCS           "relocs"
-#define RZ_FLAGS_FS_REGISTERS        "registers"
-#define RZ_FLAGS_FS_RESOURCES        "resources"
-#define RZ_FLAGS_FS_SECTIONS         "sections"
-#define RZ_FLAGS_FS_SEGMENTS         "segments"
-#define RZ_FLAGS_FS_SIGNS            "sign"
-#define RZ_FLAGS_FS_STRINGS          "strings"
-#define RZ_FLAGS_FS_SYMBOLS          "symbols"
-#define RZ_FLAGS_FS_SYMBOLS_SECTIONS "symbols.sections"
-#define RZ_FLAGS_FS_SYSCALLS         "syscalls"
+#define RZ_FLAGS_FS_CLASSES                 "classes"
+#define RZ_FLAGS_FS_FUNCTIONS               "functions"
+#define RZ_FLAGS_FS_IMPORTS                 "imports"
+#define RZ_FLAGS_FS_RELOCS                  "relocs"
+#define RZ_FLAGS_FS_REGISTERS               "registers"
+#define RZ_FLAGS_FS_RESOURCES               "resources"
+#define RZ_FLAGS_FS_SECTIONS                "sections"
+#define RZ_FLAGS_FS_SEGMENTS                "segments"
+#define RZ_FLAGS_FS_SIGNS                   "sign"
+#define RZ_FLAGS_FS_STRINGS                 "strings"
+#define RZ_FLAGS_FS_SYMBOLS                 "symbols"
+#define RZ_FLAGS_FS_SYMBOLS_SECTIONS        "symbols.sections"
+#define RZ_FLAGS_FS_SYSCALLS                "syscalls"
+#define RZ_FLAGS_FS_MMIO_REGISTERS          "registers.mmio"
+#define RZ_FLAGS_FS_MMIO_REGISTERS_EXTENDED "registers.extended"
 
 #define RZ_GRAPH_FORMAT_NO     0
 #define RZ_GRAPH_FORMAT_GMLFCN 1
@@ -770,6 +773,11 @@ RZ_API char *rz_core_sysenv_begin(RzCore *core, const char *cmd);
 RZ_API void rz_core_sysenv_end(RzCore *core, const char *cmd);
 
 RZ_API void rz_core_recover_vars(RzCore *core, RzAnalysisFunction *fcn, bool argonly);
+
+/* cmd_linux_heap_glibc.c */
+RZ_API RzList *rz_heap_chunks_list(RzCore *core, ut64 m_arena);
+RZ_API RzList *rz_heap_arenas_list(RzCore *core);
+RZ_API RzHeapChunkSimple *rz_heap_chunk(RzCore *core, ut64 addr);
 // XXX dupe from rz_bin.h
 /* bin.c */
 #define RZ_CORE_BIN_ACC_STRINGS          0x001

@@ -17,7 +17,7 @@ RZ_API RzSyscall *rz_syscall_ref(RzSyscall *sc) {
 /**
  * \brief Creates a new RzSysregItem type
  *
- * \param name Name of the callable type
+ * \param name Name of the SysregItem (sysregitem->name)
  */
 RZ_API RZ_OWN RzSysregItem *rz_sysreg_item_new(RZ_NULLABLE const char *name) {
 	RzSysregItem *sysregitem = RZ_NEW0(RzSysregItem);
@@ -40,9 +40,21 @@ RZ_API RzSysregsDB *rz_sysregs_db_new() {
 	}
 	sysregdb->port = ht_up_new0();
 	if (!sysregdb->port) {
+		free(sysregdb);
 		return NULL;
 	}
 	return sysregdb;
+}
+
+/**
+ * \brief Frees a RzSysregDB type
+ */
+RZ_API void rz_sysregs_db_free(RzSysregsDB *sysregdb) {
+	if (!sysregdb) {
+		return;
+	}
+	ht_up_free(sysregdb->port);
+	free(sysregdb);
 }
 
 /**
@@ -70,6 +82,7 @@ RZ_API void rz_syscall_free(RzSyscall *s) {
 		free(s->os);
 		free(s->cpu);
 		free(s->arch);
+		rz_sysregs_db_free(s->srdb);
 		free(s);
 	}
 }
@@ -176,8 +189,8 @@ static bool sdb_load_by_path(RZ_NONNULL RzSysregsDB *sysregdb, const char *path)
  * \param s reference to RzSysregDB
  * \param path reference to path of the SDB file
  */
-RZ_API bool rz_type_db_load_sysregs_sdb(RzSysregsDB *sysregdb, const char *path) {
-	if (!rz_file_exists(path)) {
+RZ_API bool rz_sysreg_load_sdb(RzSysregsDB *sysregdb, const char *path) {
+	if (!rz_file_exists(path) || !sysregdb) {
 		return false;
 	}
 	return sdb_load_by_path(sysregdb, path);
@@ -195,10 +208,10 @@ RZ_API bool rz_sysreg_set_arch(RzSyscall *s, const char *arch, const char *dir_p
 	char *path = sdb_fmt(RZ_JOIN_4_PATHS("%s", RZ_SDB, "reg", "%s-%s-%d.sdb"), dir_prefix,
 		arch, s->cpu, s->bits);
 
-	s->srdb = rz_sysregs_db_new();
 	if (path) {
-		if (!rz_type_db_load_sysregs_sdb(s->srdb, path)) {
-			s->srdb = NULL;
+		if (!rz_sysreg_load_sdb(s->srdb, path)) {
+			rz_sysregs_db_free(s->srdb);
+			s->srdb = rz_sysregs_db_new();
 			return false;
 		}
 	}
@@ -251,11 +264,14 @@ RZ_API bool rz_syscall_setup(RzSyscall *s, const char *arch, int bits, const cha
 	}
 
 	if (sysregs_changed) {
+		rz_sysregs_db_free(s->srdb);
+		s->srdb = rz_sysregs_db_new();
 		char *dbName = rz_str_newf(RZ_JOIN_2_PATHS("reg", "%s-%s-%d"),
 			arch, cpu, bits);
 		if (dbName) {
-			if (!rz_type_db_load_sysregs_sdb(s->srdb, dbName)) {
-				s->srdb = NULL;
+			if (!rz_sysreg_load_sdb(s->srdb, dbName)) {
+				rz_sysregs_db_free(s->srdb);
+				s->srdb = rz_sysregs_db_new();
 			}
 			free(dbName);
 		}
@@ -416,7 +432,8 @@ RZ_API const char *rz_sysreg_get(RzSyscall *s, const char *type, ut64 port) {
 		return NULL;
 	}
 	RzSysregItem *item = ht_up_find(s->srdb->port, port, NULL);
-	if (item)
+	if (item && !strcmp(item->type, type)) {
 		return item->comment;
+	}
 	return NULL;
 }

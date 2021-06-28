@@ -102,12 +102,12 @@ static const char *sdb_elf_header_format = "?[2]E[2]E[4]ExxxxN2N2N2N2N2N2"
 					   " entry phoff shoff flags ehsize phentsize phnum shentsize shnum shstrndx";
 #endif
 
-static bool in_virtual_phdr(Elf_(Phdr) * segment, ut64 addr) {
-	return addr >= segment->p_vaddr && addr < segment->p_vaddr + segment->p_filesz;
+static bool in_virtual_phdr(RzBinElfSegment *segment, ut64 addr) {
+	return addr >= segment->data.p_vaddr && addr < segment->data.p_vaddr + segment->data.p_filesz;
 }
 
-static bool in_physical_phdr(Elf_(Phdr) * segment, ut64 addr) {
-	return addr >= segment->p_offset && addr < segment->p_offset + segment->p_filesz;
+static bool in_physical_phdr(RzBinElfSegment *segment, ut64 addr) {
+	return addr >= segment->data.p_offset && addr < segment->data.p_offset + segment->data.p_filesz;
 }
 
 static void init_phdr_sdb(ELFOBJ *bin) {
@@ -134,107 +134,14 @@ static HtUP *rel_cache_new(RzBinElfReloc *relocs, ut32 reloc_num) {
 	return rel_cache;
 }
 
-static void set_phdr_entry(ELFOBJ *bin, size_t phdr_entry_index, ut8 *entry) {
-	size_t pos = 0;
-
-	bin->phdr[phdr_entry_index].p_type = READ32(entry, pos);
-#if RZ_BIN_ELF64
-	bin->phdr[phdr_entry_index].p_flags = READ32(entry, pos);
-#endif
-	bin->phdr[phdr_entry_index].p_offset = RZ_BIN_ELF_READWORD(entry, pos);
-	bin->phdr[phdr_entry_index].p_vaddr = RZ_BIN_ELF_READWORD(entry, pos);
-	bin->phdr[phdr_entry_index].p_paddr = RZ_BIN_ELF_READWORD(entry, pos);
-	bin->phdr[phdr_entry_index].p_filesz = RZ_BIN_ELF_READWORD(entry, pos);
-	bin->phdr[phdr_entry_index].p_memsz = RZ_BIN_ELF_READWORD(entry, pos);
-#ifndef RZ_BIN_ELF64
-	bin->phdr[phdr_entry_index].p_flags = READ32(entry, pos);
-#endif
-	bin->phdr[phdr_entry_index].p_align = RZ_BIN_ELF_READWORD(entry, pos);
-}
-
-static bool read_phdr_entry(ELFOBJ *bin, size_t phdr_entry_index) {
-	const size_t offset = bin->ehdr.e_phoff + phdr_entry_index * sizeof(Elf_(Phdr));
-	ut8 phdr[sizeof(Elf_(Phdr))] = { 0 };
-
-	if (rz_buf_read_at(bin->b, offset, phdr, sizeof(Elf_(Phdr))) < 0) {
-		bprintf("read (phdr)\n");
-		RZ_FREE(bin->phdr);
-		return false;
-	}
-
-	set_phdr_entry(bin, phdr_entry_index, phdr);
-
-	return true;
-}
-
-static bool read_phdr(ELFOBJ *bin, bool need_linux_kernel_hack) {
-	bool phdr_found = false;
-
-	for (size_t i = 0; i < bin->ehdr.e_phnum; i++) {
-		if (!read_phdr_entry(bin, i)) {
-			return false;
-		}
-
-		if (need_linux_kernel_hack && bin->phdr[i].p_type == PT_PHDR) {
-			phdr_found = true;
-		}
-	}
-
-	if (need_linux_kernel_hack && phdr_found) {
-		ut64 load_addr = Elf_(rz_bin_elf_get_baddr)(bin);
-		bin->ehdr.e_phoff = Elf_(rz_bin_elf_v2p_new)(bin, load_addr + bin->ehdr.e_phoff);
-		return read_phdr(bin, false);
-	}
-
-	return true;
-}
-
-/* Here is the where all the fun starts.
- * Linux kernel since 2005 calculates phdr offset wrongly
- * adding it to the load address (va of the LOAD0).
- * See `fs/binfmt_elf.c` file this line:
- *    NEW_AUX_ENT(AT_PHDR, load_addr + exec->e_phoff);
- * So after the first read, we fix the address and read it again
- */
-static bool need_linux_kernel_hack(ELFOBJ *bin) {
-	return bin->size > 128 * 1024 && (bin->ehdr.e_machine == EM_X86_64 || bin->ehdr.e_machine == EM_386);
-}
-
-static bool init_phdr_header(ELFOBJ *bin) {
-	bin->phdr = RZ_NEWS0(Elf_(Phdr), bin->ehdr.e_phnum);
-	if (!bin->phdr) {
-		perror("malloc (phdr)");
-		return false;
-	}
-
-	if (!read_phdr(bin, need_linux_kernel_hack(bin))) {
-		return false;
-	}
-
-	return true;
-}
-
-static bool check_phdr_size(ELFOBJ *bin) {
-	ut32 phdr_size;
-
-	if (!UT32_MUL(&phdr_size, (ut32)bin->ehdr.e_phnum, sizeof(Elf_(Phdr)))) {
-		return false;
-	}
-
-	if (!phdr_size || bin->ehdr.e_phoff + phdr_size > bin->size) {
-		return false;
-	}
-
-	return true;
-}
-
 static bool rz_bin_elf_init_phdr(ELFOBJ *bin) {
-	if (!bin->ehdr.e_phnum || !check_phdr_size(bin)) {
+	bin->segments = Elf_(rz_bin_elf_segments_new)(bin);
+	if (!bin->segments) {
 		return false;
 	}
 
 	init_phdr_sdb(bin);
-	return init_phdr_header(bin);
+	return true;
 }
 
 static void init_shdr_sdb(ELFOBJ *bin) {
@@ -249,138 +156,38 @@ static void init_shdr_sdb(ELFOBJ *bin) {
 	sdb_set(bin->kv, "elf_shdr.format", sdb_elf_shdr_format, 0);
 }
 
-static void set_shdr_entry(ELFOBJ *bin, size_t shdr_entry_index, ut8 *entry) {
-	size_t pos = 0;
-
-	bin->shdr[shdr_entry_index].sh_name = READ32(entry, pos);
-	bin->shdr[shdr_entry_index].sh_type = READ32(entry, pos);
-	bin->shdr[shdr_entry_index].sh_flags = RZ_BIN_ELF_READWORD(entry, pos);
-	bin->shdr[shdr_entry_index].sh_addr = RZ_BIN_ELF_READWORD(entry, pos);
-	bin->shdr[shdr_entry_index].sh_offset = RZ_BIN_ELF_READWORD(entry, pos);
-	bin->shdr[shdr_entry_index].sh_size = RZ_BIN_ELF_READWORD(entry, pos);
-	bin->shdr[shdr_entry_index].sh_link = READ32(entry, pos);
-	bin->shdr[shdr_entry_index].sh_info = READ32(entry, pos);
-	bin->shdr[shdr_entry_index].sh_addralign = RZ_BIN_ELF_READWORD(entry, pos);
-	bin->shdr[shdr_entry_index].sh_entsize = RZ_BIN_ELF_READWORD(entry, pos);
-}
-
-static bool read_shdr_entry(ELFOBJ *bin, size_t shdr_entry_index) {
-	const size_t offset = bin->ehdr.e_shoff + shdr_entry_index * sizeof(Elf_(Shdr));
-	ut8 shdr[sizeof(Elf_(Shdr))] = { 0 };
-
-	if (rz_buf_read_at(bin->b, offset, shdr, sizeof(Elf_(Shdr))) < 0) {
-		bprintf("read (shdr) at 0x%" PFMT64x "\n", (ut64)bin->ehdr.e_shoff);
-		RZ_FREE(bin->shdr);
-		return false;
-	}
-
-	set_shdr_entry(bin, shdr_entry_index, shdr);
-
-	return true;
-}
-
-static bool read_shdr(ELFOBJ *bin) {
-	for (size_t i = 0; i < bin->ehdr.e_shnum; i++) {
-		if (!read_shdr_entry(bin, i)) {
-			return false;
-		}
-	}
-
-	return true;
-}
-
-static bool init_shdr_header(ELFOBJ *bin) {
-	bin->shdr = RZ_NEWS0(Elf_(Shdr), bin->ehdr.e_shnum);
-	if (!bin->shdr) {
-		perror("malloc (shdr)");
-		return false;
-	}
-
-	if (!read_shdr(bin)) {
-		return false;
-	}
-
-	return true;
-}
-
-static bool check_shdr_size(ELFOBJ *bin) {
-	ut32 shdr_size;
-
-	if (!UT32_MUL(&shdr_size, bin->ehdr.e_shnum, sizeof(Elf_(Shdr)))) {
-		return false;
-	}
-
-	if (!shdr_size || bin->ehdr.e_shoff + shdr_size > bin->size) {
-		return false;
-	}
-
-	return true;
-}
-
-static bool rz_bin_elf_init_shdr(ELFOBJ *bin) {
-	if (!bin->ehdr.e_shnum || !check_shdr_size(bin)) {
+static bool rz_bin_elf_init_shdr(ELFOBJ *bin, RzVector *sections) {
+	bin->sections = Elf_(rz_bin_elf_convert_sections)(bin, sections);
+	if (!bin->sections) {
 		return false;
 	}
 
 	init_shdr_sdb(bin);
 
-	return init_shdr_header(bin);
-}
-
-static void init_shstrtab_sdb(ELFOBJ *bin) {
-	sdb_num_set(bin->kv, "elf_shstrtab.offset", bin->shstrtab_section->sh_offset, 0);
-	sdb_num_set(bin->kv, "elf_shstrtab.size", bin->shstrtab_section->sh_size, 0);
-}
-
-static bool check_shstrtab(ELFOBJ *bin) {
-	return bin->shstrtab_section->sh_offset + bin->shstrtab_section->sh_size < bin->size;
-}
-
-static bool check_shstrtab_index(ELFOBJ *bin, Elf_(Half) shstrtab_index) {
-	return shstrtab_index != SHN_UNDEF && Elf_(rz_bin_elf_is_sh_index_valid)(bin, shstrtab_index);
-}
-
-static bool set_shstrtab(ELFOBJ *bin) {
-	bin->shstrtab = calloc(1, bin->shstrtab_size + 1);
-	if (!bin->shstrtab) {
-		perror("malloc");
-		return false;
-	}
-
-	int res = rz_buf_read_at(bin->b, bin->shstrtab_section->sh_offset, (ut8 *)bin->shstrtab, bin->shstrtab_section->sh_size);
-	if (res < 0) {
-		bprintf("read (shstrtab) at 0x%" PFMT64x "\n", (ut64)bin->shstrtab_section->sh_offset);
-		RZ_FREE(bin->shstrtab);
-		return false;
-	}
-
-	bin->shstrtab[bin->shstrtab_section->sh_size] = '\0';
-
 	return true;
 }
 
-static bool rz_bin_elf_init_shstrtab(ELFOBJ *bin) {
-	if (!bin->shdr) {
+static void init_shstrtab_sdb(ELFOBJ *bin, ut64 offset, ut64 size) {
+	sdb_num_set(bin->kv, "elf_shstrtab.offset", offset, 0);
+	sdb_num_set(bin->kv, "elf_shstrtab.size", size, 0);
+}
+
+static bool rz_bin_elf_init_shstrtab(ELFOBJ *bin, RzVector *sections) {
+	if (!sections) {
 		return false;
 	}
 
-	Elf_(Half) shstrtab_index = bin->ehdr.e_shstrndx;
-	if (!check_shstrtab_index(bin, shstrtab_index) || !bin->shdr[shstrtab_index].sh_size) {
+	Elf_(Shdr) *section = rz_vector_index_ptr(sections, bin->ehdr.e_shstrndx);
+	if (!section || !section->sh_size) {
 		return false;
 	}
 
-	bin->shstrtab_section = bin->strtab_section = bin->shdr + shstrtab_index;
-	bin->shstrtab_size = bin->shstrtab_section->sh_size;
-
-	init_shstrtab_sdb(bin);
-
-	if (!check_shstrtab(bin)) {
+	bin->shstrtab = Elf_(rz_bin_elf_strtab_new)(bin, section->sh_offset, section->sh_size);
+	if (!bin->shstrtab) {
 		return false;
 	}
 
-	if (!set_shstrtab(bin)) {
-		return true;
-	}
+	init_shstrtab_sdb(bin, section->sh_offset, section->sh_size);
 
 	return true;
 }
@@ -403,8 +210,9 @@ static bool is_valid_elf_ident(ut8 *e_ident) {
 }
 
 static bool init_ehdr_ident(ELFOBJ *bin) {
+	memset(&bin->ehdr, 0, sizeof(Elf_(Ehdr)));
+
 	if (rz_buf_read_at(bin->b, 0, bin->ehdr.e_ident, EI_NIDENT) == -1) {
-		bprintf("read (magic)\n");
 		return false;
 	}
 
@@ -417,29 +225,44 @@ static bool init_ehdr_ident(ELFOBJ *bin) {
 	return true;
 }
 
-static bool init_ehdr_other(ELFOBJ *bin) {
-	size_t i = EI_NIDENT;
-	ut8 ehdr[sizeof(Elf_(Ehdr))] = { 0 };
-	rz_buf_read_at(bin->b, 0, ehdr, sizeof(ehdr));
+static bool is_tiny_elf(ELFOBJ *bin) {
+	return bin->size == 45;
+}
 
-	if (bin->size < 32) { // tinyelf != sizeof (Elf_(Ehdr)))
-		bprintf("read (ehdr)\n");
+static Elf_(Half) get_tiny_elf_phnum(ELFOBJ *bin) {
+	ut8 tmp;
+	ut64 offset = 44;
+
+	if (Elf_(rz_bin_elf_read_char)(bin, &offset, &tmp)) {
+		return tmp;
+	}
+
+	return 0;
+}
+
+static bool init_ehdr_other(ELFOBJ *bin) {
+	ut64 offset = EI_NIDENT;
+
+	if (!Elf_(rz_bin_elf_read_half)(bin, &offset, &bin->ehdr.e_type) ||
+		!Elf_(rz_bin_elf_read_half)(bin, &offset, &bin->ehdr.e_machine) ||
+		!Elf_(rz_bin_elf_read_word)(bin, &offset, &bin->ehdr.e_version) ||
+		!Elf_(rz_bin_elf_read_addr)(bin, &offset, &bin->ehdr.e_entry) ||
+		!Elf_(rz_bin_elf_read_off)(bin, &offset, &bin->ehdr.e_phoff)) {
 		return false;
 	}
 
-	bin->ehdr.e_type = READ16(ehdr, i);
-	bin->ehdr.e_machine = READ16(ehdr, i);
-	bin->ehdr.e_version = READ32(ehdr, i);
-	bin->ehdr.e_entry = RZ_BIN_ELF_READWORD(ehdr, i);
-	bin->ehdr.e_phoff = RZ_BIN_ELF_READWORD(ehdr, i);
-	bin->ehdr.e_shoff = RZ_BIN_ELF_READWORD(ehdr, i);
-	bin->ehdr.e_flags = READ32(ehdr, i);
-	bin->ehdr.e_ehsize = READ16(ehdr, i);
-	bin->ehdr.e_phentsize = READ16(ehdr, i);
-	bin->ehdr.e_phnum = READ16(ehdr, i);
-	bin->ehdr.e_shentsize = READ16(ehdr, i);
-	bin->ehdr.e_shnum = READ16(ehdr, i);
-	bin->ehdr.e_shstrndx = READ16(ehdr, i);
+	Elf_(rz_bin_elf_read_off)(bin, &offset, &bin->ehdr.e_shoff);
+	Elf_(rz_bin_elf_read_word)(bin, &offset, &bin->ehdr.e_flags);
+	Elf_(rz_bin_elf_read_half)(bin, &offset, &bin->ehdr.e_ehsize);
+	Elf_(rz_bin_elf_read_half)(bin, &offset, &bin->ehdr.e_phentsize);
+	Elf_(rz_bin_elf_read_half)(bin, &offset, &bin->ehdr.e_phnum);
+	Elf_(rz_bin_elf_read_half)(bin, &offset, &bin->ehdr.e_shentsize);
+	Elf_(rz_bin_elf_read_half)(bin, &offset, &bin->ehdr.e_shnum);
+	Elf_(rz_bin_elf_read_half)(bin, &offset, &bin->ehdr.e_shstrndx);
+
+	if (is_tiny_elf(bin)) {
+		bin->ehdr.e_phnum = get_tiny_elf_phnum(bin);
+	}
 
 	return true;
 }
@@ -458,241 +281,6 @@ static bool rz_bin_elf_init_ehdr(ELFOBJ *bin) {
 	return true;
 }
 
-static bool check_dynstr_size(ELFOBJ *bin, size_t shdr_entry_index) {
-	return bin->shdr[shdr_entry_index].sh_offset + bin->shdr[shdr_entry_index].sh_size < bin->size;
-}
-
-static bool set_dynstr(ELFOBJ *bin, size_t shdr_entry_index) {
-	Elf_(Off) offset = bin->shdr[shdr_entry_index].sh_offset;
-	bin->dynstr = RZ_NEWS0(char, bin->shdr[shdr_entry_index].sh_size + 1);
-	bin->dynstr_size = bin->shdr[shdr_entry_index].sh_size;
-
-	if (!bin->dynstr) {
-		bprintf("Cannot allocate memory for dynamic strings\n");
-		return false;
-	}
-
-	if (!check_dynstr_size(bin, shdr_entry_index)) {
-		return false;
-	}
-
-	if (rz_buf_read_at(bin->b, offset, (ut8 *)bin->dynstr, bin->dynstr_size) < 0) {
-		RZ_FREE(bin->dynstr);
-		bin->dynstr_size = 0;
-		return false;
-	}
-
-	return true;
-}
-
-static bool rz_bin_elf_init_dynstr(ELFOBJ *bin) {
-	if (!bin->shdr || !bin->shstrtab) {
-		return false;
-	}
-
-	for (size_t i = 0; i < bin->ehdr.e_shnum; i++) {
-		if (bin->shdr[i].sh_name > bin->shstrtab_size) {
-			return false;
-		}
-
-		const char *section_name = bin->shstrtab + bin->shdr[i].sh_name;
-
-		if (bin->shdr[i].sh_type == SHT_STRTAB && !strcmp(section_name, ".dynstr")) {
-			return set_dynstr(bin, i);
-		}
-	}
-
-	return false;
-}
-
-static void set_default_value_dynamic_info(ELFOBJ *bin) {
-	bin->dyn_info.dt_init = 0;
-	bin->dyn_info.dt_fini = 0;
-	bin->dyn_info.dt_pltrelsz = 0;
-	bin->dyn_info.dt_pltgot = RZ_BIN_ELF_ADDR_MAX;
-	bin->dyn_info.dt_hash = RZ_BIN_ELF_ADDR_MAX;
-	bin->dyn_info.dt_gnu_hash = RZ_BIN_ELF_ADDR_MAX;
-	bin->dyn_info.dt_strtab = RZ_BIN_ELF_ADDR_MAX;
-	bin->dyn_info.dt_symtab = RZ_BIN_ELF_ADDR_MAX;
-	bin->dyn_info.dt_rela = RZ_BIN_ELF_ADDR_MAX;
-	bin->dyn_info.dt_relasz = 0;
-	bin->dyn_info.dt_relaent = 0;
-	bin->dyn_info.dt_strsz = 0;
-	bin->dyn_info.dt_syment = 0;
-	bin->dyn_info.dt_rel = RZ_BIN_ELF_ADDR_MAX;
-	bin->dyn_info.dt_relsz = 0;
-	bin->dyn_info.dt_relent = 0;
-	bin->dyn_info.dt_pltrel = RZ_BIN_ELF_XWORD_MAX;
-	bin->dyn_info.dt_jmprel = RZ_BIN_ELF_ADDR_MAX;
-	bin->dyn_info.dt_pltgot = RZ_BIN_ELF_ADDR_MAX;
-	bin->dyn_info.dt_mips_pltgot = RZ_BIN_ELF_ADDR_MAX;
-	bin->dyn_info.dt_bind_now = false;
-	bin->dyn_info.dt_flags = RZ_BIN_ELF_XWORD_MAX;
-	bin->dyn_info.dt_flags_1 = RZ_BIN_ELF_XWORD_MAX;
-	bin->dyn_info.dt_rpath = RZ_BIN_ELF_XWORD_MAX;
-	bin->dyn_info.dt_runpath = RZ_BIN_ELF_XWORD_MAX;
-	rz_vector_init(&bin->dyn_info.dt_needed, sizeof(Elf_(Off)), NULL, NULL);
-}
-
-static bool check_dynamic_segment(ELFOBJ *bin, size_t phdr_entry_index) {
-	if (bin->phdr[phdr_entry_index].p_filesz > bin->size) {
-		return false;
-	}
-
-	if (bin->phdr[phdr_entry_index].p_offset + sizeof(Elf_(Dyn)) > bin->size) {
-		return false;
-	}
-
-	return true;
-}
-
-static Elf_(Phdr) * get_dynamic_segment(ELFOBJ *bin) {
-	for (size_t i = 0; i < bin->ehdr.e_phnum; i++) {
-		if (bin->phdr[i].p_type == PT_DYNAMIC) {
-			if (!check_dynamic_segment(bin, i)) {
-				return NULL;
-			}
-
-			return bin->phdr + i;
-		}
-	}
-
-	return NULL;
-}
-
-static size_t get_maximum_number_of_dynamic_entries(ut64 dynamic_size) {
-	return dynamic_size / sizeof(Elf_(Dyn));
-}
-
-static bool fill_dynamic_entry(ELFOBJ *bin, ut64 entry_offset, Elf_(Dyn) * d) {
-	ut8 tmp[sizeof(Elf_(Dyn))] = { 0 };
-
-	if (rz_buf_read_at(bin->b, entry_offset, tmp, sizeof(Elf_(Dyn))) < 0) {
-		return false;
-	}
-
-	size_t pos = 0;
-
-	d->d_tag = RZ_BIN_ELF_READWORD(tmp, pos);
-	d->d_un.d_ptr = RZ_BIN_ELF_READWORD(tmp, pos);
-
-	return true;
-}
-
-static void fill_dynamic_entries(ELFOBJ *bin, ut64 loaded_offset, ut64 dyn_size) {
-	Elf_(Dyn) d = { 0 };
-	size_t number_of_entries = get_maximum_number_of_dynamic_entries(dyn_size);
-
-	for (size_t i = 0; i < number_of_entries; i++) {
-		ut64 entry_offset = loaded_offset + i * sizeof(Elf_(Dyn));
-		if (!fill_dynamic_entry(bin, entry_offset, &d)) {
-			break;
-		}
-
-		switch (d.d_tag) {
-		case DT_NULL:
-			break;
-		case DT_PLTRELSZ:
-			bin->dyn_info.dt_pltrelsz = d.d_un.d_val;
-			break;
-		case DT_PLTGOT:
-			bin->dyn_info.dt_pltgot = d.d_un.d_ptr;
-			break;
-		case DT_HASH:
-			bin->dyn_info.dt_hash = d.d_un.d_ptr;
-			break;
-		case DT_GNU_HASH:
-			bin->dyn_info.dt_gnu_hash = d.d_un.d_ptr;
-			break;
-		case DT_STRTAB:
-			bin->dyn_info.dt_strtab = d.d_un.d_ptr;
-			break;
-		case DT_SYMTAB:
-			bin->dyn_info.dt_symtab = d.d_un.d_ptr;
-			break;
-		case DT_RELA:
-			bin->dyn_info.dt_rela = d.d_un.d_ptr;
-			break;
-		case DT_RELASZ:
-			bin->dyn_info.dt_relasz = d.d_un.d_val;
-			break;
-		case DT_RELAENT:
-			bin->dyn_info.dt_relaent = d.d_un.d_val;
-			break;
-		case DT_STRSZ:
-			bin->dyn_info.dt_strsz = d.d_un.d_val;
-			break;
-		case DT_SYMENT:
-			bin->dyn_info.dt_syment = d.d_un.d_val;
-			break;
-		case DT_REL:
-			bin->dyn_info.dt_rel = d.d_un.d_ptr;
-			break;
-		case DT_RELSZ:
-			bin->dyn_info.dt_relsz = d.d_un.d_val;
-			break;
-		case DT_RELENT:
-			bin->dyn_info.dt_relent = d.d_un.d_val;
-			break;
-		case DT_PLTREL:
-			bin->dyn_info.dt_pltrel = d.d_un.d_val;
-			break;
-		case DT_JMPREL:
-			bin->dyn_info.dt_jmprel = d.d_un.d_ptr;
-			break;
-		case DT_MIPS_PLTGOT:
-			bin->dyn_info.dt_mips_pltgot = d.d_un.d_ptr;
-			break;
-		case DT_BIND_NOW:
-			bin->dyn_info.dt_bind_now = true;
-			break;
-		case DT_FLAGS:
-			bin->dyn_info.dt_flags = d.d_un.d_val;
-			break;
-		case DT_FLAGS_1:
-			bin->dyn_info.dt_flags_1 = d.d_un.d_val;
-			break;
-		case DT_RPATH:
-			bin->dyn_info.dt_rpath = d.d_un.d_val;
-			break;
-		case DT_RUNPATH:
-			bin->dyn_info.dt_runpath = d.d_un.d_val;
-			break;
-		case DT_NEEDED:
-			rz_vector_push(&bin->dyn_info.dt_needed, &d.d_un.d_val);
-			break;
-		case DT_INIT:
-			bin->dyn_info.dt_init = d.d_un.d_ptr;
-			break;
-		case DT_FINI:
-			bin->dyn_info.dt_fini = d.d_un.d_ptr;
-			break;
-		case DT_DEBUG:
-		case DT_INIT_ARRAY:
-		case DT_FINI_ARRAY:
-		case DT_INIT_ARRAYSZ:
-		case DT_FINI_ARRAYSZ:
-		case DT_PREINIT_ARRAY:
-		case DT_PREINIT_ARRAYSZ:
-		case DT_SONAME:
-			// common dynamic entries in ELF, but we don't need to
-			// do anything with them.
-			break;
-		default:
-			if ((d.d_tag >= DT_VERSYM) && (d.d_tag <= DT_VERNEEDNUM)) {
-				bin->version_info[DT_VERSIONTAGIDX(d.d_tag)] = d.d_un.d_val;
-			} else {
-				RZ_LOG_DEBUG("Dynamic tag %" PFMT64d " not handled\n", (ut64)d.d_tag);
-			}
-			break;
-		}
-
-		if (d.d_tag == DT_NULL) {
-			break;
-		}
-	}
-}
-
 static void init_dynamic_section_sdb(ELFOBJ *bin) {
 	switch (Elf_(rz_bin_elf_has_relro)(bin)) {
 	case RZ_BIN_ELF_FULL_RELRO:
@@ -708,69 +296,43 @@ static void init_dynamic_section_sdb(ELFOBJ *bin) {
 }
 
 static bool rz_bin_elf_init_dynamic_section(ELFOBJ *bin) {
-	if (!bin->phdr) {
+	bin->dt_dynamic = Elf_(rz_bin_elf_dt_dynamic_new)(bin);
+
+	if (!bin->dt_dynamic) {
 		return false;
 	}
 
-	set_default_value_dynamic_info(bin);
-
-	Elf_(Phdr) *dynamic = get_dynamic_segment(bin);
-	if (!dynamic) {
-		return false;
-	}
-
-	Elf_(Xword) dynamic_size = dynamic->p_filesz;
-	ut64 dynamic_offset = Elf_(rz_bin_elf_v2p_new)(bin, dynamic->p_vaddr);
-	if (dynamic_offset == UT64_MAX) {
-		return false;
-	}
-
-	if (!dynamic_size || dynamic_offset + dynamic_size > bin->size) {
-		return false;
-	}
-
-	fill_dynamic_entries(bin, dynamic_offset, dynamic_size);
 	init_dynamic_section_sdb(bin);
 
+	return bin->dt_dynamic;
+}
+
+static void init_dynstr_sdb(ELFOBJ *bin, ut64 strtab_addr, Elf_(Xword) strtab_size) {
+	sdb_num_set(bin->kv, "elf_dynstr.offset", strtab_addr, 0);
+	sdb_num_set(bin->kv, "elf_dynstr.size", strtab_size, 0);
+}
+
+static bool rz_bin_elf_init_dynstr(ELFOBJ *bin) {
+	ut64 addr;
+	ut64 size;
+
+	if (!Elf_(rz_bin_elf_get_dt_info)(bin, DT_STRTAB, &addr) || !Elf_(rz_bin_elf_get_dt_info)(bin, DT_STRSZ, &size)) {
+		RZ_LOG_WARN(".dynstr not found or invalid\n");
+		return false;
+	}
+
+	ut64 offset = Elf_(rz_bin_elf_v2p_new)(bin, addr);
+	if (offset == UT64_MAX) {
+		return false;
+	}
+
+	bin->dynstr = Elf_(rz_bin_elf_strtab_new)(bin, offset, size);
+	if (!bin->dynstr) {
+		return false;
+	}
+
+	init_dynstr_sdb(bin, offset, size);
 	return true;
-}
-
-static void init_strtab_sdb(ELFOBJ *bin, ut64 strtab_addr, Elf_(Xword) strtab_size) {
-	sdb_num_set(bin->kv, "elf_strtab.offset", strtab_addr, 0);
-	sdb_num_set(bin->kv, "elf_strtab.size", strtab_size, 0);
-}
-
-static bool read_strtab(ELFOBJ *bin, ut64 strtab_addr, Elf_(Xword) strtab_size) {
-	bin->strtab_size = strtab_size;
-	bin->strtab = RZ_NEWS0(char, strtab_size + 1);
-	if (!bin->strtab) {
-		return false;
-	}
-
-	if (rz_buf_read_at(bin->b, strtab_addr, (ut8 *)bin->strtab, strtab_size) < 0) {
-		free(bin->strtab);
-		return false;
-	}
-
-	return true;
-}
-
-static bool rz_bin_elf_init_strtab(ELFOBJ *bin) {
-	if (bin->dyn_info.dt_strtab == RZ_BIN_ELF_ADDR_MAX || !bin->dyn_info.dt_strsz) {
-		bprintf("DT_STRTAB not found or invalid\n");
-		return false;
-	}
-
-	ut64 strtab_addr = Elf_(rz_bin_elf_v2p_new)(bin, bin->dyn_info.dt_strtab);
-	Elf_(Xword) strtab_size = bin->dyn_info.dt_strsz;
-
-	init_strtab_sdb(bin, strtab_addr, strtab_size);
-
-	if (strtab_addr + strtab_size > bin->size) {
-		return false;
-	}
-
-	return read_strtab(bin, strtab_addr, strtab_size);
 }
 
 static bool rz_bin_elf_init(ELFOBJ *bin) {
@@ -779,32 +341,32 @@ static bool rz_bin_elf_init(ELFOBJ *bin) {
 		return false;
 	}
 	if (!rz_bin_elf_init_phdr(bin) && !Elf_(rz_bin_elf_is_relocatable)(bin)) {
-		bprintf("Cannot initialize program headers\n");
+		RZ_LOG_WARN("Cannot initialize program headers\n");
 	}
 	if (bin->ehdr.e_type == ET_CORE) {
 		if (!Elf_(rz_bin_elf_init_notes)(bin)) {
-			bprintf("Cannot parse PT_NOTE segments\n");
+			RZ_LOG_WARN("Cannot parse PT_NOTE segments\n");
 		}
 	} else {
-		if (!rz_bin_elf_init_shdr(bin)) {
-			bprintf("Cannot initialize section headers\n");
+		RzVector *sections = Elf_(rz_bin_elf_sections_new)(bin);
+
+		if (!rz_bin_elf_init_shstrtab(bin, sections)) {
+			RZ_LOG_WARN("Cannot initialize section strings table\n");
 		}
 
-		if (!rz_bin_elf_init_shstrtab(bin)) {
-			bprintf("Cannot initialize strings table\n");
-		}
-
-		if (!rz_bin_elf_init_dynstr(bin) && !Elf_(rz_bin_elf_is_relocatable)(bin)) {
-			bprintf("Cannot initialize dynamic strings\n");
+		if (!Elf_(rz_bin_elf_is_relocatable)(bin) && !Elf_(rz_bin_elf_is_static)(bin)) {
+			if (!rz_bin_elf_init_dynamic_section(bin) || !rz_bin_elf_init_dynstr(bin)) {
+				RZ_LOG_WARN("Cannot initialize dynamic section\n");
+			}
 		}
 
 		bin->baddr = Elf_(rz_bin_elf_get_baddr)(bin);
 
-		if (!Elf_(rz_bin_elf_is_relocatable)(bin) && !Elf_(rz_bin_elf_is_static)(bin)) {
-			if (!rz_bin_elf_init_dynamic_section(bin) || !rz_bin_elf_init_strtab(bin)) {
-				bprintf("Cannot initialize dynamic section\n");
-			}
+		if (!rz_bin_elf_init_shdr(bin, sections)) {
+			RZ_LOG_WARN("Cannot initialize section headers\n");
 		}
+
+		rz_vector_free(sections);
 	}
 
 	bin->boffset = Elf_(rz_bin_elf_get_boffset)(bin);
@@ -814,7 +376,6 @@ static bool rz_bin_elf_init(ELFOBJ *bin) {
 	bin->symbols_by_ord_size = 0;
 	bin->symbols_by_ord = NULL;
 
-	bin->g_sections = Elf_(rz_bin_elf_get_sections)(bin);
 	bin->g_relocs = Elf_(rz_bin_elf_get_relocs)(bin);
 
 	bin->rel_cache = rel_cache_new(bin->g_relocs, bin->g_reloc_num);
@@ -824,7 +385,7 @@ static bool rz_bin_elf_init(ELFOBJ *bin) {
 	return true;
 }
 
-RZ_OWN ELFOBJ *Elf_(rz_bin_elf_new_buf)(RZ_NONNULL RzBuffer *buf, bool verbose) {
+RZ_OWN ELFOBJ *Elf_(rz_bin_elf_new_buf)(RZ_NONNULL RzBuffer *buf) {
 	rz_return_val_if_fail(buf, NULL);
 
 	ELFOBJ *bin = RZ_NEW0(ELFOBJ);
@@ -835,7 +396,6 @@ RZ_OWN ELFOBJ *Elf_(rz_bin_elf_new_buf)(RZ_NONNULL RzBuffer *buf, bool verbose) 
 	bin->b = rz_buf_ref(buf);
 	bin->size = rz_buf_size(buf);
 	bin->kv = sdb_new0();
-	bin->verbose = verbose;
 
 	if (rz_bin_elf_init(bin)) {
 		return bin;
@@ -854,13 +414,14 @@ RZ_OWN ELFOBJ *Elf_(rz_bin_elf_new_buf)(RZ_NONNULL RzBuffer *buf, bool verbose) 
 void Elf_(rz_bin_elf_free)(RZ_NONNULL ELFOBJ *bin) {
 	rz_return_if_fail(bin);
 
-	free(bin->phdr);
-	free(bin->shdr);
-	free(bin->strtab);
-	free(bin->shstrtab);
-	free(bin->dynstr);
+	rz_vector_free(bin->segments);
+	rz_vector_free(bin->sections);
 
-	free(bin->g_sections);
+	Elf_(rz_bin_elf_dt_dynamic_free)(bin->dt_dynamic);
+
+	Elf_(rz_bin_elf_strtab_free)(bin->shstrtab);
+	Elf_(rz_bin_elf_strtab_free)(bin->dynstr);
+
 	free(bin->g_symbols);
 	free(bin->g_imports);
 	free(bin->g_relocs);
@@ -875,7 +436,6 @@ void Elf_(rz_bin_elf_free)(RZ_NONNULL ELFOBJ *bin) {
 
 	ht_up_free(bin->rel_cache);
 
-	rz_vector_fini(&bin->dyn_info.dt_needed);
 	rz_list_free(bin->note_segments);
 
 	if (bin->imports_by_ord) {
@@ -907,7 +467,7 @@ void Elf_(rz_bin_elf_free)(RZ_NONNULL ELFOBJ *bin) {
 ut64 Elf_(rz_bin_elf_p2v_new)(RZ_NONNULL ELFOBJ *bin, ut64 paddr) {
 	rz_return_val_if_fail(bin, UT64_MAX);
 
-	if (!bin->phdr) {
+	if (!Elf_(rz_bin_elf_has_segments)(bin)) {
 		if (Elf_(rz_bin_elf_is_relocatable)(bin)) {
 			return bin->baddr + paddr;
 		}
@@ -915,11 +475,10 @@ ut64 Elf_(rz_bin_elf_p2v_new)(RZ_NONNULL ELFOBJ *bin, ut64 paddr) {
 		return UT64_MAX;
 	}
 
-	for (size_t i = 0; i < bin->ehdr.e_phnum; i++) {
-		Elf_(Phdr) *segment = bin->phdr + i;
-
-		if (segment->p_type == PT_LOAD && in_physical_phdr(segment, paddr)) {
-			return segment->p_vaddr + paddr - segment->p_offset;
+	RzBinElfSegment *segment;
+	rz_bin_elf_foreach_segments(bin, segment) {
+		if (segment->data.p_type == PT_LOAD && in_physical_phdr(segment, paddr)) {
+			return segment->data.p_vaddr + paddr - segment->data.p_offset;
 		}
 	}
 
@@ -937,7 +496,7 @@ ut64 Elf_(rz_bin_elf_p2v_new)(RZ_NONNULL ELFOBJ *bin, ut64 paddr) {
 ut64 Elf_(rz_bin_elf_v2p_new)(RZ_NONNULL ELFOBJ *bin, ut64 vaddr) {
 	rz_return_val_if_fail(bin, UT64_MAX);
 
-	if (!bin->phdr) {
+	if (!Elf_(rz_bin_elf_has_segments)(bin)) {
 		if (Elf_(rz_bin_elf_is_relocatable)(bin)) {
 			return vaddr - bin->baddr;
 		}
@@ -945,11 +504,10 @@ ut64 Elf_(rz_bin_elf_v2p_new)(RZ_NONNULL ELFOBJ *bin, ut64 vaddr) {
 		return UT64_MAX;
 	}
 
-	for (size_t i = 0; i < bin->ehdr.e_phnum; i++) {
-		Elf_(Phdr) *segment = bin->phdr + i;
-
-		if (segment->p_type == PT_LOAD && in_virtual_phdr(segment, vaddr)) {
-			return segment->p_offset + vaddr - segment->p_vaddr;
+	RzBinElfSegment *segment;
+	rz_bin_elf_foreach_segments(bin, segment) {
+		if (segment->data.p_type == PT_LOAD && in_virtual_phdr(segment, vaddr)) {
+			return segment->data.p_offset + vaddr - segment->data.p_vaddr;
 		}
 	}
 

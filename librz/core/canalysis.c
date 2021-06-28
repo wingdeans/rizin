@@ -125,8 +125,6 @@ static char *getFunctionNamePrefix(RzCore *core, ut64 off, const char *name) {
 	return strdup(name);
 }
 
-static RzCore *mycore = NULL;
-
 // XXX: copypaste from analysis/data.c
 #define MINLEN 1
 static int is_string(const ut8 *buf, int size, int *len) {
@@ -742,7 +740,7 @@ RZ_IPI void rz_core_analysis_esil_init_mem(RzCore *core, const char *name, ut64 
 	v = sdb_itoa(esil->stack_fd, val, 10);
 	sdb_set(core->sdb, "aeim.fd", v, 0);
 
-	rz_config_set_i(core->config, "io.va", true);
+	rz_config_set_b(core->config, "io.va", true);
 	if (pattern && *pattern) {
 		switch (*pattern) {
 		case '0':
@@ -866,8 +864,8 @@ RZ_IPI void rz_core_analysis_esil_references_all_functions(RzCore *core) {
  */
 RZ_IPI void rz_core_analysis_esil_emulate(RzCore *core, ut64 addr, ut64 until_addr, int off) {
 	RzAnalysisEsil *esil = core->analysis->esil;
-	int i, j = 0;
-	ut8 *buf;
+	int i = 0, j = 0;
+	ut8 *buf = NULL;
 	RzAnalysisOp aop = { 0 };
 	int ret, bsize = RZ_MAX(4096, core->blocksize);
 	const int mininstrsz = rz_analysis_archinfo(core->analysis, RZ_ANALYSIS_ARCHINFO_MIN_OP_SIZE);
@@ -887,7 +885,6 @@ RZ_IPI void rz_core_analysis_esil_emulate(RzCore *core, ut64 addr, ut64 until_ad
 	buf = malloc(bsize);
 	if (!buf) {
 		eprintf("Cannot allocate %d byte(s)\n", bsize);
-		free(buf);
 		return;
 	}
 	if (addr == -1) {
@@ -938,6 +935,7 @@ RZ_IPI void rz_core_analysis_esil_emulate(RzCore *core, ut64 addr, ut64 until_ad
 	}
 	rz_core_seek(core, oldoff, true);
 	rz_reg_setv(core->dbg->reg, "SP", cursp);
+	free(buf);
 }
 
 RZ_IPI void rz_core_analysis_esil_emulate_bb(RzCore *core) {
@@ -2350,6 +2348,10 @@ static int core_analysis_graph_construct_nodes(RzCore *core, RzAnalysisFunction 
 					} else {
 						if (is_star) {
 							char *title = get_title(bbi->addr);
+							if (!title) {
+								rz_config_hold_free(hc);
+								return false;
+							}
 							char *body_b64 = rz_base64_encode_dyn((const ut8 *)str, strlen(title));
 							int color = (bbi && bbi->diff) ? bbi->diff->type : 0;
 							if (!title || !body_b64) {
@@ -5363,12 +5365,13 @@ static ut64 ntarget = UT64_MAX;
 
 // TODO differentiate endian-aware mem_read with other reads; move ntarget handling to another function
 static int esilbreak_mem_read(RzAnalysisEsil *esil, ut64 addr, ut8 *buf, int len) {
+	RzCore *core = esil->analysis->coreb.core;
 	ut8 str[128];
 	if (addr != UT64_MAX) {
 		esilbreak_last_read = addr;
 	}
 	handle_var_stack_access(esil, addr, RZ_ANALYSIS_VAR_ACCESS_TYPE_READ, len);
-	if (myvalid(mycore->io, addr) && rz_io_read_at(mycore->io, addr, (ut8 *)buf, len)) {
+	if (myvalid(core->io, addr) && rz_io_read_at(core->io, addr, (ut8 *)buf, len)) {
 		ut64 refptr;
 		bool trace = true;
 		switch (len) {
@@ -5383,22 +5386,22 @@ static int esilbreak_mem_read(RzAnalysisEsil *esil, ut64 addr, ut8 *buf, int len
 			break;
 		default:
 			trace = false;
-			rz_io_read_at(mycore->io, addr, (ut8 *)buf, len);
+			rz_io_read_at(core->io, addr, (ut8 *)buf, len);
 			break;
 		}
 		// TODO incorrect
 		bool validRef = false;
-		if (trace && myvalid(mycore->io, refptr)) {
+		if (trace && myvalid(core->io, refptr)) {
 			if (ntarget == UT64_MAX || ntarget == refptr) {
 				str[0] = 0;
-				if (rz_io_read_at(mycore->io, refptr, str, sizeof(str)) < 1) {
+				if (rz_io_read_at(core->io, refptr, str, sizeof(str)) < 1) {
 					//eprintf ("Invalid read\n");
 					str[0] = 0;
 					validRef = false;
 				} else {
-					rz_analysis_xrefs_set(mycore->analysis, esil->address, refptr, RZ_ANALYSIS_REF_TYPE_DATA);
+					rz_analysis_xrefs_set(core->analysis, esil->address, refptr, RZ_ANALYSIS_REF_TYPE_DATA);
 					str[sizeof(str) - 1] = 0;
-					add_string_ref(mycore, esil->address, refptr);
+					add_string_ref(core, esil->address, refptr);
 					esilbreak_last_data = UT64_MAX;
 					validRef = true;
 				}
@@ -5407,7 +5410,7 @@ static int esilbreak_mem_read(RzAnalysisEsil *esil, ut64 addr, ut8 *buf, int len
 
 		/** resolve ptr */
 		if (ntarget == UT64_MAX || ntarget == addr || (ntarget == UT64_MAX && !validRef)) {
-			rz_analysis_xrefs_set(mycore->analysis, esil->address, addr, RZ_ANALYSIS_REF_TYPE_DATA);
+			rz_analysis_xrefs_set(core->analysis, esil->address, addr, RZ_ANALYSIS_REF_TYPE_DATA);
 		}
 	}
 	return 0; // fallback
@@ -5660,7 +5663,6 @@ RZ_API void rz_core_analysis_esil(RzCore *core, const char *str, const char *tar
 	ut64 end = 0LL;
 	ut64 cur;
 
-	mycore = core;
 	if (!strcmp(str, "?")) {
 		eprintf("Usage: aae[f] [len] [addr] - analyze refs in function, section or len bytes with esil\n");
 		eprintf("  aae $SS @ $S             - analyze the whole section\n");
@@ -5947,7 +5949,7 @@ RZ_API void rz_core_analysis_esil(RzCore *core, const char *str, const char *tar
 					break;
 				}
 				if ((target && dst == ntarget) || !target) {
-					if (dst > 0xffff && op.src[1] && (dst & 0xffff) == (op.src[1]->imm & 0xffff) && myvalid(mycore->io, dst)) {
+					if (dst > 0xffff && op.src[1] && (dst & 0xffff) == (op.src[1]->imm & 0xffff) && myvalid(core->io, dst)) {
 						RzFlagItem *f;
 						char *str;
 						if (CHECKREF(dst) || CHECKREF(cur)) {
@@ -5957,7 +5959,7 @@ RZ_API void rz_core_analysis_esil(RzCore *core, const char *str, const char *tar
 							}
 							if ((f = rz_core_flag_get_by_spaces(core->flags, dst))) {
 								rz_meta_set_string(core->analysis, RZ_META_TYPE_COMMENT, cur, f->name);
-							} else if ((str = is_string_at(mycore, dst, NULL))) {
+							} else if ((str = is_string_at(core, dst, NULL))) {
 								char *str2 = sdb_fmt("esilref: '%s'", str);
 								// HACK avoid format string inside string used later as format
 								// string crashes disasm inside agf under some conditions.
@@ -5974,7 +5976,7 @@ RZ_API void rz_core_analysis_esil(RzCore *core, const char *str, const char *tar
 		case RZ_ANALYSIS_OP_TYPE_LOAD: {
 			ut64 dst = esilbreak_last_read;
 			if (dst != UT64_MAX && CHECKREF(dst)) {
-				if (myvalid(mycore->io, dst)) {
+				if (myvalid(core->io, dst)) {
 					rz_analysis_xrefs_set(core->analysis, cur, dst, RZ_ANALYSIS_REF_TYPE_DATA);
 					if (cfg_analysis_strings) {
 						add_string_ref(core, op.addr, dst);
@@ -5983,7 +5985,7 @@ RZ_API void rz_core_analysis_esil(RzCore *core, const char *str, const char *tar
 			}
 			dst = esilbreak_last_data;
 			if (dst != UT64_MAX && CHECKREF(dst)) {
-				if (myvalid(mycore->io, dst)) {
+				if (myvalid(core->io, dst)) {
 					rz_analysis_xrefs_set(core->analysis, cur, dst, RZ_ANALYSIS_REF_TYPE_DATA);
 					if (cfg_analysis_strings) {
 						add_string_ref(core, op.addr, dst);
@@ -6135,7 +6137,6 @@ RZ_API int rz_core_search_value_in_range(RzCore *core, RzInterval search_itv, ut
 	bool vinfun = rz_config_get_b(core->config, "analysis.vinfun");
 	bool vinfunr = rz_config_get_b(core->config, "analysis.vinfunrange");
 	bool analyze_strings = rz_config_get_b(core->config, "analysis.strings");
-	mycore = core;
 	ut8 buf[4096];
 	ut64 v64, value = 0, size;
 	ut64 from = search_itv.addr, to = rz_itv_end(search_itv);
@@ -6242,7 +6243,7 @@ RZ_API int rz_core_search_value_in_range(RzCore *core, RzInterval search_itv, ut
 				if (isValidMatch) {
 					cb(core, addr, value, vsize, cb_user);
 					if (analyze_strings && stringAt(core, addr)) {
-						add_string_ref(mycore, addr, value);
+						add_string_ref(core, addr, value);
 					}
 					hitctr++;
 				}
@@ -6446,6 +6447,36 @@ RZ_API void rz_core_analysis_flag_every_function(RzCore *core) {
 			fcn->addr, rz_analysis_function_size_from_entry(fcn));
 	}
 	rz_flag_space_pop(core->flags);
+}
+
+static bool add_mmio_flag_cb(void *user, const ut64 addr, const void *v) {
+	const char *name = v;
+	RzFlag *flags = (RzFlag *)user;
+	rz_flag_space_push(flags, RZ_FLAGS_FS_MMIO_REGISTERS);
+	rz_flag_set(flags, name, addr, 1);
+	rz_flag_space_pop(flags);
+	return true;
+}
+
+static bool add_mmio_extended_flag_cb(void *user, const ut64 addr, const void *v) {
+	const char *name = v;
+	RzFlag *flags = (RzFlag *)user;
+	rz_flag_space_push(flags, RZ_FLAGS_FS_MMIO_REGISTERS_EXTENDED);
+	rz_flag_set(flags, name, addr, 1);
+	rz_flag_space_pop(flags);
+	return true;
+}
+
+/**
+ * \brief Adds the IO and extended IO registers from the CPU profiles as flags
+ * \param profile reference to RzArchProfile 
+ * \param flags reference to RzFlag 
+ */
+RZ_API void rz_arch_profile_add_flag_every_io(RzArchProfile *profile, RzFlag *flags) {
+	rz_flag_unset_all_in_space(flags, RZ_FLAGS_FS_MMIO_REGISTERS);
+	rz_flag_unset_all_in_space(flags, RZ_FLAGS_FS_MMIO_REGISTERS_EXTENDED);
+	ht_up_foreach(profile->registers_mmio, add_mmio_flag_cb, flags);
+	ht_up_foreach(profile->registers_extended, add_mmio_extended_flag_cb, flags);
 }
 
 /* TODO: move into rz_analysis_function_rename (); */
@@ -7059,13 +7090,13 @@ RZ_API bool rz_core_analysis_everything(RzCore *core, bool experimental, char *d
 	if (!rz_str_startswith(rz_config_get(core->config, "asm.arch"), "x86")) {
 		rz_core_analysis_value_pointers(core, RZ_OUTPUT_MODE_STANDARD);
 		rz_core_task_yield(&core->tasks);
-		bool ioCache = rz_config_get_i(core->config, "io.pcache");
-		rz_config_set_i(core->config, "io.pcache", 1);
+		bool pcache = rz_config_get_b(core->config, "io.pcache");
+		rz_config_set_b(core->config, "io.pcache", false);
 		oldstr = rz_print_rowlog(core->print, "Emulate functions to find computed references (aaef)");
 		rz_core_analysis_esil_references_all_functions(core);
 		rz_print_rowlog_done(core->print, oldstr);
 		rz_core_task_yield(&core->tasks);
-		rz_config_set_i(core->config, "io.pcache", ioCache);
+		rz_config_set_b(core->config, "io.pcache", pcache);
 		if (rz_cons_is_breaked()) {
 			return false;
 		}
@@ -7139,6 +7170,9 @@ RZ_API bool rz_core_analysis_everything(RzCore *core, bool experimental, char *d
 	if (dh_orig) {
 		rz_config_set(core->config, "dbg.backend", dh_orig);
 		rz_core_task_yield(&core->tasks);
+	}
+	if (!is_unknown_file(core)) {
+		rz_analysis_add_device_peripheral_map(core->bin->cur->o, core->analysis);
 	}
 	return true;
 }
@@ -7231,6 +7265,52 @@ RZ_IPI char *rz_core_analysis_all_vars_display(RzCore *core, RzAnalysisFunction 
 	return rz_strbuf_drain(sb);
 }
 
+static int check_rom_exists(const void *value, const void *data) {
+	const char *name = (const char *)value;
+	const RzBinSection *sections = (const RzBinSection *)data;
+	return strcmp(name, sections->name);
+}
+
+/**
+ * \brief Maps the device peripherals as sections
+ *
+ * Gets the ROM_ADDRESS and ROM_SIZE from the corresponding CPU Profile
+ * and adds it as a section (RzBinSection) named ".rom" which will appear
+ * when you run `iS`.
+ *
+ * \param o reference to RzBinObject
+ * \param analysis reference to RzAnalysis
+ */
+RZ_API bool rz_analysis_add_device_peripheral_map(RzBinObject *o, RzAnalysis *analysis) {
+	rz_return_val_if_fail(o && analysis, false);
+	if (!o || !analysis) {
+		return false;
+	}
+	ut64 rom_size = analysis->arch_target->profile->rom_size;
+	ut64 rom_address = analysis->arch_target->profile->rom_address;
+	if (rom_address == 0 || rom_size == 0) {
+		return false;
+	}
+	if (!o->sections) {
+		return false;
+	}
+	if (rz_list_find(o->sections, ".rom", check_rom_exists)) {
+		return false;
+	}
+	RzBinSection *s = RZ_NEW0(RzBinSection);
+	if (!s) {
+		return false;
+	}
+	s->name = strdup(".rom");
+	s->vaddr = rom_address;
+	s->vsize = rom_size;
+	s->size = rom_size;
+	s->paddr = rom_address;
+	s->perm = RZ_PERM_RX;
+	rz_list_append(o->sections, s);
+	return true;
+}
+
 RZ_IPI bool rz_core_analysis_types_propagation(RzCore *core) {
 	RzListIter *it;
 	RzAnalysisFunction *fcn;
@@ -7239,13 +7319,12 @@ RZ_IPI bool rz_core_analysis_types_propagation(RzCore *core) {
 		eprintf("TOFIX: aaft can't run in debugger mode.\n");
 		return false;
 	}
-	const char *io_cache_key = "io.pcache.write";
 	RzConfigHold *hold = rz_config_hold_new(core->config);
-	rz_config_hold_i(hold, "io.va", io_cache_key, NULL);
-	bool io_cache = rz_config_get_i(core->config, io_cache_key);
+	rz_config_hold_i(hold, "io.va", "io.pcache.write", NULL);
+	bool io_cache = rz_config_get_b(core->config, "io.pcache.write");
 	if (!io_cache) {
 		// XXX. we shouldnt need this, but it breaks 'rizin -c aaa -w ls'
-		rz_config_set_i(core->config, io_cache_key, true);
+		rz_config_set_b(core->config, "io.pcache.write", true);
 	}
 	const bool delete_regs = !rz_flag_space_count(core->flags, RZ_FLAGS_FS_REGISTERS);
 	seek = core->offset;

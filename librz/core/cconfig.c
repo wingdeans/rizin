@@ -432,6 +432,10 @@ static bool cb_asmcpu(void *user, void *data) {
 	}
 	rz_asm_set_cpu(core->rasm, node->value);
 	rz_config_set(core->config, "analysis.cpu", node->value);
+
+	const char *dir_prefix = rz_config_get(core->config, "dir.prefix");
+	rz_arch_profiles_init(core->analysis->arch_target, node->value, rz_config_get(core->config, "asm.arch"), dir_prefix);
+
 	return true;
 }
 
@@ -558,11 +562,13 @@ static bool cb_asmarch(void *user, void *data) {
 	// set pcalign
 	if (core->analysis) {
 		const char *asmcpu = rz_config_get(core->config, "asm.cpu");
+		const char *dir_prefix = rz_config_get(core->config, "dir.prefix");
 		if (!rz_syscall_setup(core->analysis->syscall, node->value, core->analysis->bits, asmcpu, asmos)) {
 			//eprintf ("asm.arch: Cannot setup syscall '%s/%s' from '%s'\n",
 			//	node->value, asmos, RZ_LIBDIR"/rizin/"RZ_VERSION"/syscall");
 		}
 		update_syscall_ns(core);
+		rz_arch_profiles_init(core->analysis->arch_target, asmcpu, node->value, dir_prefix);
 	}
 	//if (!strcmp (node->value, "bf"))
 	//	rz_config_set (core->config, "dbg.backend", "bf");
@@ -607,6 +613,9 @@ static bool cb_asmarch(void *user, void *data) {
 
 	const char *dir_prefix = rz_config_get(core->config, "dir.prefix");
 	rz_sysreg_set_arch(core->analysis->syscall, node->value, dir_prefix);
+	if (asmcpu) {
+		rz_arch_profiles_init(core->analysis->arch_target, asmcpu->value, node->value, dir_prefix);
+	}
 
 	return true;
 }
@@ -672,7 +681,7 @@ static bool cb_asmbits(void *user, void *data) {
 		rz_debug_set_arch(core->dbg, core->analysis->cur->arch, bits);
 		bool load_from_debug = rz_config_get_b(core->config, "cfg.debug");
 		if (load_from_debug) {
-			if (core->dbg->h && core->dbg->h->reg_profile) {
+			if (core->dbg->cur && core->dbg->cur->reg_profile) {
 // XXX. that should depend on the plugin, not the host os
 #if __WINDOWS__
 #if !defined(_WIN64)
@@ -681,7 +690,7 @@ static bool cb_asmbits(void *user, void *data) {
 				core->dbg->bits = RZ_SYS_BITS_64;
 #endif
 #endif
-				char *rp = core->dbg->h->reg_profile(core->dbg);
+				char *rp = core->dbg->cur->reg_profile(core->dbg);
 				rz_reg_set_profile_string(core->dbg->reg, rp);
 				rz_reg_set_profile_string(core->analysis->reg, rp);
 				free(rp);
@@ -1613,14 +1622,14 @@ static bool cb_iopcache(void *user, void *data) {
 	RzConfigNode *node = (RzConfigNode *)data;
 	if ((bool)node->i_value) {
 		if (core) {
-			rz_config_set_i(core->config, "io.pcache.read", true);
-			rz_config_set_i(core->config, "io.pcache.write", true);
+			rz_config_set_b(core->config, "io.pcache.read", true);
+			rz_config_set_b(core->config, "io.pcache.write", true);
 		}
 	} else {
 		if (core && core->io) {
 			rz_io_desc_cache_fini_all(core->io);
-			rz_config_set_i(core->config, "io.pcache.read", false);
-			rz_config_set_i(core->config, "io.pcache.write", false);
+			rz_config_set_b(core->config, "io.pcache.read", false);
+			rz_config_set_b(core->config, "io.pcache.write", false);
 		}
 	}
 	return true;
@@ -1638,7 +1647,7 @@ static bool cb_iopcacheread(void *user, void *data) {
 			core->io->p_cache &= 2;
 			if (!(core->io->p_cache & 2)) {
 				rz_io_desc_cache_fini_all(core->io);
-				rz_config_set_i(core->config, "io.pcache", false);
+				rz_config_set_b(core->config, "io.pcache", false);
 			}
 		}
 	}
@@ -1657,7 +1666,7 @@ static bool cb_iopcachewrite(void *user, void *data) {
 			core->io->p_cache &= 1;
 			if (!(core->io->p_cache & 1)) {
 				rz_io_desc_cache_fini_all(core->io);
-				rz_config_set_i(core->config, "io.pcache", false);
+				rz_config_set_b(core->config, "io.pcache", false);
 			}
 		}
 	}

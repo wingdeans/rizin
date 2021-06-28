@@ -45,7 +45,7 @@ static const char *help_msg_i[] = {
 	"im", "", "Show info about predefined memory allocation",
 	"iM", "", "Show main address",
 	"io", " [file]", "Load info from file (or last opened) use bin.baddr",
-	"iO", "[?]", "Perform binary operation (dump, resize, change sections, ...)",
+	"iO", "[?]", "Perform binary operation (dump, show binary info)",
 	"ir", "", "List the Relocations",
 	"iR", "", "List the Resources",
 	"is", "", "List the Symbols",
@@ -700,7 +700,7 @@ RZ_IPI int rz_cmd_info(void *data, const char *input) {
 		case 'O': // "iO"
 			switch (input[1]) {
 			case ' ':
-				rz_sys_cmdf("rz-bin -O \"%s\" \"%s\"", rz_str_trim_head_ro(input + 1), desc->name);
+				rz_sys_cmdf("rz-bin -O \"%s\" \"%s\"", rz_str_trim_head_ro(input + 1), desc ? desc->name : "");
 				break;
 			default:
 				rz_sys_cmdf("rz-bin -O help");

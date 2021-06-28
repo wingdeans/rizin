@@ -11,6 +11,7 @@
 #include <rz_io.h>
 #include <rz_msg_digest.h>
 #include <rz_syscall.h>
+#include <rz_cmd.h>
 
 #include <rz_config.h>
 #include "rz_bind.h"
@@ -50,6 +51,13 @@ RZ_LIB_VERSION_HEADER(rz_debug);
 #define PTRACE_SYSCALL    PT_STEP
 #endif
 
+#define CMD_CHECK_DEBUG_DEAD(core) \
+	do { \
+		if (rz_debug_is_dead(core->dbg)) { \
+			rz_cons_println("Debugging is not enabled. Run ood?"); \
+			return RZ_CMD_STATUS_ERROR; \
+		} \
+	} while (0)
 #define SNAP_PAGE_SIZE    4096
 #define CHECK_POINT_LIMIT 0x100000 //TODO: take the benchmark
 /*
@@ -287,14 +295,15 @@ typedef struct rz_debug_t {
 	RzList *q_regs;
 	const char *creg; // current register value
 	RzBreakpoint *bp;
-	void *user; // XXX(jjd): unused?? meant for caller's use??
+	RZ_DEPRECATE void *user; /// currently only used in windows-specific io_debug
 	char *snap_path;
 
 	/* io */
 	PrintfCallback cb_printf;
 	RzIOBind iob;
 
-	struct rz_debug_plugin_t *h;
+	struct rz_debug_plugin_t *cur;
+	void *plugin_data;
 	RzList *plugins;
 
 	bool pc_at_bp; /* after a breakpoint, is the pc at the bp? */
@@ -358,11 +367,12 @@ typedef struct rz_debug_plugin_t {
 	const char *license;
 	const char *author;
 	const char *version;
-	//const char **archs; // MUST BE DEPRECATED!!!!
 	ut32 bits;
 	const char *arch;
 	int canstep;
 	int keepio;
+	bool (*init)(RzDebug *dbg, void **user);
+	void (*fini)(RzDebug *debug, void *user);
 	/* life */
 	RzDebugInfo *(*info)(RzDebug *dbg, const char *arg);
 	int (*startv)(int argc, char **argv);
@@ -384,19 +394,18 @@ typedef struct rz_debug_plugin_t {
 	RzList *(*kill_list)(RzDebug *dbg);
 	int (*contsc)(RzDebug *dbg, int pid, int sc);
 	RzList *(*frames)(RzDebug *dbg, ut64 at);
-	RzBreakpointCallback breakpoint;
+	RzBreakpointCallback breakpoint; /// Callback to be used for RzBreakpoint. When called, RzBreakpoint.user points to the RzDebug.
 	// XXX: specify, pid, tid, or RzDebug ?
 	int (*reg_read)(RzDebug *dbg, int type, ut8 *buf, int size);
 	int (*reg_write)(RzDebug *dbg, int type, const ut8 *buf, int size); //XXX struct rz_regset_t regs);
 	char *(*reg_profile)(RzDebug *dbg);
-	int (*set_reg_profile)(const char *str);
+	int (*set_reg_profile)(RzDebug *dbg, const char *str);
 	/* memory */
 	RzList *(*map_get)(RzDebug *dbg);
 	RzList *(*modules_get)(RzDebug *dbg);
 	RzDebugMap *(*map_alloc)(RzDebug *dbg, ut64 addr, int size, bool thp);
 	int (*map_dealloc)(RzDebug *dbg, ut64 addr, int size);
 	int (*map_protect)(RzDebug *dbg, ut64 addr, int size, int perms);
-	int (*init)(RzDebug *dbg);
 	int (*drx)(RzDebug *dbg, int n, ut64 addr, int size, int rwx, int g, int api_type);
 	RzDebugDescPlugin desc;
 	// TODO: use RzList here
@@ -493,8 +502,9 @@ RZ_API RzList *rz_debug_map_list_new(void);
 RZ_API RzDebugMap *rz_debug_map_get(RzDebug *dbg, ut64 addr);
 RZ_API RzDebugMap *rz_debug_map_new(char *name, ut64 addr, ut64 addr_end, int perm, int user);
 RZ_API void rz_debug_map_free(RzDebugMap *map);
-RZ_API void rz_debug_map_list(RzDebug *dbg, ut64 addr, const char *input);
+RZ_API void rz_debug_map_print(RzDebug *dbg, ut64 addr, RzCmdStateOutput *state);
 RZ_API void rz_debug_map_list_visual(RzDebug *dbg, ut64 addr, const char *input, int colors);
+RZ_API RzList *rz_debug_map_list(RzDebug *dbg, bool user_map);
 
 /* descriptors */
 RZ_API RzDebugDesc *rz_debug_desc_new(int fd, char *path, int perm, int type, int off);

@@ -78,12 +78,12 @@ static Sdb *get_sdb(RzBinFile *bf) {
 }
 
 static bool load_buffer(RzBinFile *bf, void **bin_obj, RzBuffer *buf, ut64 loadaddr, Sdb *sdb) {
-	struct Elf_(rz_bin_elf_obj_t) *res = Elf_(rz_bin_elf_new_buf)(buf, bf->rbin->verbose);
+	ELFOBJ *res = Elf_(rz_bin_elf_new_buf)(buf);
 	if (res) {
-		//	sdb_ns_set (sdb, "info", res->kv);
 		*bin_obj = res;
 		return true;
 	}
+
 	return false;
 }
 
@@ -218,28 +218,33 @@ static RzList *maps_unpatched(RzBinFile *bf) {
 	if (!ret) {
 		return NULL;
 	}
-	Elf_(Phdr) *phdr = obj->phdr;
-	if (phdr) {
+
+	if (Elf_(rz_bin_elf_has_segments)(obj)) {
 		ut64 core_sp = Elf_(rz_bin_elf_get_sp_val)(obj);
 		int n = 0;
-		for (size_t i = 0; i < obj->ehdr.e_phnum; i++) {
-			if (phdr[i].p_type != PT_LOAD) {
+
+		RzBinElfSegment *iter;
+		rz_bin_elf_foreach_segments(obj, iter) {
+			if (iter->data.p_type != PT_LOAD) {
 				continue;
 			}
+
 			RzBinMap *map = RZ_NEW0(RzBinMap);
 			if (!map) {
 				break;
 			}
-			map->paddr = phdr[i].p_offset;
-			map->psize = phdr[i].p_filesz;
-			map->vsize = phdr[i].p_memsz;
-			map->vaddr = phdr[i].p_vaddr;
-			map->perm = phdr[i].p_flags | RZ_PERM_R;
+
+			map->paddr = iter->data.p_offset;
+			map->psize = iter->data.p_filesz;
+			map->vsize = iter->data.p_memsz;
+			map->vaddr = iter->data.p_vaddr;
+			map->perm = iter->data.p_flags | RZ_PERM_R;
+
 			// map names specific to core files...
-			if (core_sp != UT64_MAX && core_sp >= phdr[i].p_vaddr && core_sp < phdr[i].p_vaddr + phdr[i].p_memsz) {
+			if (core_sp != UT64_MAX && core_sp >= iter->data.p_vaddr && core_sp < iter->data.p_vaddr + iter->data.p_memsz) {
 				map->name = strdup("[stack]");
 			} else {
-				RzBinElfNoteFile *nf = note_file_for_load_segment(obj, &phdr[i]);
+				RzBinElfNoteFile *nf = note_file_for_load_segment(obj, &iter->data);
 				if (nf && nf->file) {
 					map->name = strdup(nf->file);
 				}
@@ -253,21 +258,21 @@ static RzList *maps_unpatched(RzBinFile *bf) {
 		}
 	} else {
 		// Load sections if there is no PHDR
-		struct rz_bin_elf_section_t *sections = Elf_(rz_bin_elf_get_sections)(obj);
-		if (sections) {
-			for (size_t i = 0; !sections[i].last; i++) {
-				RzBinMap *map = RZ_NEW0(RzBinMap);
-				if (!map) {
-					break;
-				}
-				map->name = strdup(sections[i].name);
-				map->paddr = sections[i].offset;
-				map->psize = sections[i].type != SHT_NOBITS ? sections[i].size : 0;
-				map->vsize = sections[i].size;
-				map->vaddr = sections[i].rva;
-				map->perm = section_perms_from_flags(sections[i].flags);
-				rz_list_append(ret, map);
+
+		RzBinElfSection *section;
+		rz_bin_elf_foreach_sections(obj, section) {
+			RzBinMap *map = RZ_NEW0(RzBinMap);
+			if (!map) {
+				break;
 			}
+
+			map->name = strdup(section->name);
+			map->paddr = section->offset;
+			map->psize = section->type != SHT_NOBITS ? section->size : 0;
+			map->vsize = section->size;
+			map->vaddr = section->rva;
+			map->perm = section_perms_from_flags(section->flags);
+			rz_list_append(ret, map);
 		}
 	}
 
@@ -793,10 +798,7 @@ static RzList *maps(RzBinFile *bf) {
 }
 
 static RzList *sections(RzBinFile *bf) {
-	struct Elf_(rz_bin_elf_obj_t) *obj = (bf && bf->o) ? bf->o->bin_obj : NULL;
-	struct rz_bin_elf_section_t *section = NULL;
-	int i, num;
-	Elf_(Phdr) *phdr = NULL;
+	ELFOBJ *obj = (bf && bf->o) ? bf->o->bin_obj : NULL;
 	RzBinSection *ptr = NULL;
 	RzList *ret = NULL;
 
@@ -806,98 +808,97 @@ static RzList *sections(RzBinFile *bf) {
 
 	//there is not leak in section since they are cached by elf.c
 	//and freed within Elf_(rz_bin_elf_free)
-	if ((section = Elf_(rz_bin_elf_get_sections)(obj))) {
-		for (i = 0; !section[i].last; i++) {
-			if (!(ptr = RZ_NEW0(RzBinSection))) {
-				break;
-			}
-			ptr->name = strdup((char *)section[i].name);
-			if (strstr(ptr->name, "data") && !strstr(ptr->name, "rel") && !strstr(ptr->name, "pydata")) {
-				ptr->is_data = true;
-			} else if (!strcmp(ptr->name, "C")) {
-				ptr->is_data = true;
-			}
-			if (is_wordable_section(ptr->name)) {
-				ptr->format = rz_str_newf("Cd %d[%" PFMT64d "]",
-					RZ_BIN_ELF_WORDSIZE, section[i].size / RZ_BIN_ELF_WORDSIZE);
-			}
-			ptr->size = section[i].type != SHT_NOBITS ? section[i].size : 0;
-			ptr->vsize = section[i].size;
-			ptr->paddr = section[i].offset;
-			ptr->vaddr = section[i].rva;
-			ptr->type = section[i].type;
-			ptr->flags = section[i].flags;
-			ptr->perm = section_perms_from_flags(section[i].flags);
-			rz_list_append(ret, ptr);
+	size_t i;
+	RzBinElfSection *section;
+	rz_bin_elf_enumerate_sections(obj, section, i) {
+		if (!(ptr = RZ_NEW0(RzBinSection))) {
+			break;
 		}
+		ptr->name = strdup((char *)section->name);
+		if (strstr(ptr->name, "data") && !strstr(ptr->name, "rel") && !strstr(ptr->name, "pydata")) {
+			ptr->is_data = true;
+		} else if (!strcmp(ptr->name, "C")) {
+			ptr->is_data = true;
+		}
+		if (is_wordable_section(ptr->name)) {
+			ptr->format = rz_str_newf("Cd %zu[%" PFMT64d "]", sizeof(Elf_(Addr)), section->size / sizeof(Elf_(Addr)));
+		}
+		ptr->size = section->type != SHT_NOBITS ? section->size : 0;
+		ptr->vsize = section->size;
+		ptr->paddr = section->offset;
+		ptr->vaddr = section->rva;
+		ptr->type = section->type;
+		ptr->flags = section->flags;
+		ptr->perm = section_perms_from_flags(section->flags);
+		rz_list_append(ret, ptr);
 	}
 
 	// program headers is another section
 	ut16 mach = obj->ehdr.e_machine;
-	num = obj->ehdr.e_phnum;
-	phdr = obj->phdr;
-	if (phdr) {
-		int n = 0;
-		for (i = 0; i < num; i++) {
-			if (!(ptr = RZ_NEW0(RzBinSection))) {
-				return ret;
-			}
-			ptr->size = phdr[i].p_filesz;
-			ptr->vsize = phdr[i].p_memsz;
-			ptr->paddr = phdr[i].p_offset;
-			ptr->vaddr = phdr[i].p_vaddr;
-			ptr->perm = phdr[i].p_flags;
-			ptr->align = phdr[i].p_align;
-			ptr->is_segment = true;
-			switch (phdr[i].p_type) {
-			case PT_DYNAMIC:
-				ptr->name = strdup("DYNAMIC");
-				break;
-			case PT_LOAD: {
-				ptr->name = rz_str_newf("LOAD%d", n++);
-				ptr->perm |= RZ_PERM_R;
-				break;
-			}
-			case PT_INTERP:
-				ptr->name = strdup("INTERP");
-				break;
-			case PT_GNU_STACK:
-				ptr->name = strdup("GNU_STACK");
-				break;
-			case PT_GNU_RELRO:
-				ptr->name = strdup("GNU_RELRO");
-				break;
-			case PT_GNU_EH_FRAME:
-				ptr->name = strdup("GNU_EH_FRAME");
-				break;
-			case PT_PHDR:
-				ptr->name = strdup("PHDR");
-				break;
-			case PT_TLS:
-				ptr->name = strdup("TLS");
-				break;
-			case PT_NOTE:
-				ptr->name = strdup("NOTE");
-				break;
-			case PT_OPENBSD_RANDOMIZE:
-				ptr->name = strdup("OPENBSD_RANDOMIZE");
-				break;
-			case PT_OPENBSD_WXNEEDED:
-				ptr->name = strdup("OPENBSD_WXNEEDED");
-				break;
-			case PT_OPENBSD_BOOTDATA:
-				ptr->name = strdup("OPENBSD_BOOTDATA");
-				break;
-			default:
-				if (ptr->size == 0 && ptr->vsize == 0) {
-					ptr->name = strdup("NONE");
-				} else {
-					ptr->name = setphname(mach, phdr[i].p_type);
-				}
-				break;
-			}
-			rz_list_append(ret, ptr);
+
+	size_t n = 0;
+	RzBinElfSegment *iter;
+	rz_bin_elf_foreach_segments(obj, iter) {
+		if (!(ptr = RZ_NEW0(RzBinSection))) {
+			return ret;
 		}
+
+		ptr->size = iter->data.p_filesz;
+		ptr->vsize = iter->data.p_memsz;
+		ptr->paddr = iter->data.p_offset;
+		ptr->vaddr = iter->data.p_vaddr;
+		ptr->perm = iter->data.p_flags;
+		ptr->align = iter->data.p_align;
+		ptr->is_segment = true;
+
+		switch (iter->data.p_type) {
+		case PT_DYNAMIC:
+			ptr->name = strdup("DYNAMIC");
+			break;
+		case PT_LOAD: {
+			ptr->name = rz_str_newf("LOAD%zu", n++);
+			ptr->perm |= RZ_PERM_R;
+			break;
+		}
+		case PT_INTERP:
+			ptr->name = strdup("INTERP");
+			break;
+		case PT_GNU_STACK:
+			ptr->name = strdup("GNU_STACK");
+			break;
+		case PT_GNU_RELRO:
+			ptr->name = strdup("GNU_RELRO");
+			break;
+		case PT_GNU_EH_FRAME:
+			ptr->name = strdup("GNU_EH_FRAME");
+			break;
+		case PT_PHDR:
+			ptr->name = strdup("PHDR");
+			break;
+		case PT_TLS:
+			ptr->name = strdup("TLS");
+			break;
+		case PT_NOTE:
+			ptr->name = strdup("NOTE");
+			break;
+		case PT_OPENBSD_RANDOMIZE:
+			ptr->name = strdup("OPENBSD_RANDOMIZE");
+			break;
+		case PT_OPENBSD_WXNEEDED:
+			ptr->name = strdup("OPENBSD_WXNEEDED");
+			break;
+		case PT_OPENBSD_BOOTDATA:
+			ptr->name = strdup("OPENBSD_BOOTDATA");
+			break;
+		default:
+			if (ptr->size == 0 && ptr->vsize == 0) {
+				ptr->name = strdup("NONE");
+			} else {
+				ptr->name = setphname(mach, iter->data.p_type);
+			}
+			break;
+		}
+		rz_list_append(ret, ptr);
 	}
 
 	// add entry for ehdr
@@ -916,6 +917,7 @@ static RzList *sections(RzBinFile *bf) {
 		ptr->is_segment = true;
 		rz_list_append(ret, ptr);
 	}
+
 	return ret;
 }
 
@@ -1161,6 +1163,24 @@ static RzList *libs(RzBinFile *bf) {
 	return ret;
 }
 
+static ut64 get_got_addr(ELFOBJ *bin) {
+	if (!Elf_(rz_bin_elf_has_sections)(bin)) {
+		return 0;
+	}
+
+	RzBinElfSection *section = Elf_(rz_bin_elf_get_section_with_name)(bin, ".got");
+	if (section) {
+		return section->offset;
+	}
+
+	section = Elf_(rz_bin_elf_get_section_with_name)(bin, ".got.plt");
+	if (section) {
+		return section->offset;
+	}
+
+	return 0;
+}
+
 static RzList *relocs(RzBinFile *bf) {
 	rz_return_val_if_fail(bf && bf->o && bf->o->bin_obj, NULL);
 	RzList *ret = NULL;
@@ -1174,13 +1194,9 @@ static RzList *relocs(RzBinFile *bf) {
 	if (!(ret = rz_list_newf(free))) {
 		return NULL;
 	}
-	ut64 got_addr = Elf_(rz_bin_elf_get_section_addr)(bin, ".got");
-	if (got_addr == UT64_MAX) {
-		got_addr = Elf_(rz_bin_elf_get_section_addr)(bin, ".got.plt");
-		if (got_addr == UT64_MAX) {
-			got_addr = 0;
-		}
-	}
+
+	ut64 got_addr = get_got_addr(bin);
+
 	if (!got_addr) {
 		got_addr = reloc_targets_map_base(bf, bin);
 	}

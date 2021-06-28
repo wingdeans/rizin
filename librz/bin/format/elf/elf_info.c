@@ -286,25 +286,6 @@ static const struct ver_flags_translation ver_flags_translation_table[] = {
 	{ ~(VER_FLG_BASE | VER_FLG_WEAK), "| <unknown>" }
 };
 
-static RzBinElfLib *get_libs_from_dt_dynamic(ELFOBJ *bin, RzBinElfLib *libs) {
-	size_t i = 0;
-
-	Elf_(Word) *iter = NULL;
-	rz_vector_enumerate(&bin->dyn_info.dt_needed, iter, i) {
-		if (*iter > bin->strtab_size) {
-			free(libs);
-			return NULL;
-		}
-
-		rz_str_ncpy(libs[i].name, bin->strtab + *iter, ELF_STRING_LENGTH);
-		libs[i].last = 0;
-	}
-
-	libs[i].last = 1;
-
-	return libs;
-}
-
 static ut64 get_main_offset_from_symbol(ELFOBJ *bin) {
 	RzBinElfSymbol *symbol = Elf_(rz_bin_elf_get_symbols)(bin);
 
@@ -389,7 +370,7 @@ static ut64 get_main_offset_x86_pie(ELFOBJ *bin, ut64 entry, ut8 *buf) {
 			}
 			maddr = (ut64)rz_read_le32(&n32s[0]);
 			baddr = (bin->ehdr.e_entry >> 16) << 16;
-			if (bin->phdr) {
+			if (Elf_(rz_bin_elf_has_segments)(bin)) {
 				baddr = Elf_(rz_bin_elf_get_baddr)(bin);
 			}
 			maddr += baddr;
@@ -426,12 +407,13 @@ static ut64 get_main_offset_mips(ELFOBJ *bin, ut64 entry, ut8 *buf, size_t size)
 	   looking for the instruction generating the first argument to find main
 	   lw a0, offset(gp)
 	   */
+	ut64 got_addr;
 
-	if (bin->dyn_info.dt_pltgot == RZ_BIN_ELF_ADDR_MAX) {
+	if (!Elf_(rz_bin_elf_get_dt_info)(bin, DT_PLTGOT, &got_addr)) {
 		return 0;
 	}
 
-	ut64 got_offset = Elf_(rz_bin_elf_v2p_new)(bin, bin->dyn_info.dt_pltgot);
+	ut64 got_offset = Elf_(rz_bin_elf_v2p_new)(bin, got_addr);
 	ut64 gp = got_offset + 0x7ff0;
 
 	for (size_t i = 0; i < size; i += 4) {
@@ -511,25 +493,31 @@ static ut64 get_main_offset_arm64(ELFOBJ *bin, ut64 entry, ut8 *buf) {
 }
 
 static ut64 get_entry_offset_from_shdr(ELFOBJ *bin) {
-	ut64 entry = Elf_(rz_bin_elf_get_section_offset)(bin, ".init.text");
-	if (entry != UT64_MAX) {
-		return entry;
+	RzBinElfSection *section = Elf_(rz_bin_elf_get_section_with_name)(bin, ".init.text");
+	if (section) {
+		return section->offset;
 	}
 
-	entry = Elf_(rz_bin_elf_get_section_offset)(bin, ".text");
-	if (entry != UT64_MAX) {
-		return entry;
+	section = Elf_(rz_bin_elf_get_section_with_name)(bin, ".text");
+	if (section) {
+		return section->offset;
 	}
 
-	return Elf_(rz_bin_elf_get_section_offset)(bin, ".init");
+	section = Elf_(rz_bin_elf_get_section_with_name)(bin, ".init");
+	if (section) {
+		return section->offset;
+	}
+
+	return UT64_MAX;
 }
 
 static ut64 compute_boffset_from_phdr(ELFOBJ *bin) {
 	ut64 base = UT64_MAX;
 
-	for (size_t i = 0; i < bin->ehdr.e_phnum; i++) {
-		if (bin->phdr[i].p_type == PT_LOAD) {
-			base = RZ_MIN(base, bin->phdr[i].p_offset);
+	RzBinElfSegment *iter;
+	rz_bin_elf_foreach_segments(bin, iter) {
+		if (iter->data.p_type == PT_LOAD) {
+			base = RZ_MIN(base, iter->data.p_offset);
 		}
 	}
 
@@ -539,9 +527,10 @@ static ut64 compute_boffset_from_phdr(ELFOBJ *bin) {
 static ut64 compute_baddr_from_phdr(ELFOBJ *bin) {
 	ut64 base = UT64_MAX;
 
-	for (size_t i = 0; i < bin->ehdr.e_phnum; i++) {
-		if (bin->phdr[i].p_type == PT_LOAD) {
-			base = RZ_MIN(base, bin->phdr[i].p_vaddr);
+	RzBinElfSegment *iter;
+	rz_bin_elf_foreach_segments(bin, iter) {
+		if (iter->data.p_type == PT_LOAD) {
+			base = RZ_MIN(base, iter->data.p_vaddr);
 		}
 	}
 
@@ -549,29 +538,26 @@ static ut64 compute_baddr_from_phdr(ELFOBJ *bin) {
 }
 
 static bool elf_is_bind_now(ELFOBJ *bin) {
-	if (bin->dyn_info.dt_bind_now) {
+	ut64 flags_1;
+
+	if (Elf_(rz_bin_elf_get_dt_info)(bin, DT_BIND_NOW, NULL)) {
 		return true;
 	}
 
-	if (bin->dyn_info.dt_flags_1 != RZ_BIN_ELF_XWORD_MAX) {
-		return bin->dyn_info.dt_flags_1 & DF_1_NOW;
+	if (Elf_(rz_bin_elf_get_dt_info)(bin, DT_FLAGS_1, &flags_1)) {
+		return flags_1 & DF_1_NOW;
 	}
 
 	return false;
 }
 
 static bool elf_has_gnu_relro(ELFOBJ *bin) {
-	if (!bin->phdr) {
+	if (!Elf_(rz_bin_elf_has_segments)(bin)) {
 		return false;
 	}
 
-	for (size_t i = 0; i < bin->ehdr.e_phnum; i++) {
-		if (bin->phdr[i].p_type == PT_GNU_RELRO) {
-			return true;
-		}
-	}
-
-	return false;
+	RzBinElfSegment *segment = Elf_(rz_bin_elf_get_segment_with_type)(bin, PT_GNU_RELRO);
+	return segment && segment->is_valid;
 }
 
 static int get_bits_common(ELFOBJ *bin) {
@@ -631,7 +617,7 @@ static int get_bits_mips(ELFOBJ *bin) {
 }
 
 static bool arch_is_mips(ELFOBJ *bin) {
-	return bin->phdr && bin->ehdr.e_machine == EM_MIPS;
+	return Elf_(rz_bin_elf_has_segments)(bin) && bin->ehdr.e_machine == EM_MIPS;
 }
 
 static bool arch_is_arcompact(ELFOBJ *bin) {
@@ -654,9 +640,9 @@ static char *read_elf_intrp(ELFOBJ *bin, ut64 addr, size_t size) {
 	return str;
 }
 
-static char *get_elf_intrp(ELFOBJ *bin, size_t i) {
-	ut64 addr = bin->phdr[i].p_offset;
-	size_t size = bin->phdr[i].p_filesz;
+static char *get_elf_intrp(ELFOBJ *bin, RzBinElfSegment *segment) {
+	ut64 addr = segment->data.p_offset;
+	size_t size = segment->data.p_filesz;
 
 	sdb_num_set(bin->kv, "elf_header.intrp_addr", addr, 0);
 	sdb_num_set(bin->kv, "elf_header.intrp_size", size, 0);
@@ -672,11 +658,17 @@ static char *get_elf_intrp(ELFOBJ *bin, size_t i) {
 }
 
 static Elf_(Xword) get_dt_rpath(ELFOBJ *bin) {
-	if (bin->dyn_info.dt_rpath != RZ_BIN_ELF_XWORD_MAX) {
-		return bin->dyn_info.dt_rpath;
-	} else {
-		return bin->dyn_info.dt_runpath;
+	ut64 path;
+
+	if (Elf_(rz_bin_elf_get_dt_info)(bin, DT_RPATH, &path)) {
+		return path;
 	}
+
+	if (Elf_(rz_bin_elf_get_dt_info)(bin, DT_RUNPATH, &path)) {
+		return path;
+	}
+
+	return 0;
 }
 
 static char *get_ver_flags(ut32 flags) {
@@ -696,21 +688,16 @@ static char *get_ver_flags(ut32 flags) {
 }
 
 static bool has_dt_rpath_entry(ELFOBJ *bin) {
-	return bin->dyn_info.dt_rpath == RZ_BIN_ELF_XWORD_MAX || bin->dyn_info.dt_runpath == RZ_BIN_ELF_XWORD_MAX;
+	return Elf_(rz_bin_elf_get_dt_info)(bin, DT_RPATH, NULL) || Elf_(rz_bin_elf_get_dt_info)(bin, DT_RUNPATH, NULL);
 }
 
-static bool is_valid_section_note(ELFOBJ *bin, Elf_(Shdr) * section) {
-	return section->sh_type == SHT_NOTE && section->sh_name < bin->shstrtab_size;
-}
-
-static char *get_osabi_name_from_section_note(ELFOBJ *bin, Elf_(Shdr) * section) {
-	if (!is_valid_section_note(bin, section)) {
+static char *get_osabi_name_from_section_note(ELFOBJ *bin, RzBinElfSection *section) {
+	if (section->type != SHT_NOTE) {
 		return NULL;
 	}
 
-	const char *section_name = bin->shstrtab + section->sh_name;
 	for (size_t i = 0; i < RZ_ARRAY_SIZE(section_note_osabi_translation_table); i++) {
-		if (!strcmp(section_name, section_note_osabi_translation_table[i].note_name)) {
+		if (!strcmp(section->name, section_note_osabi_translation_table[i].note_name)) {
 			return strdup(section_note_osabi_translation_table[i].os_name);
 		}
 	}
@@ -719,12 +706,17 @@ static char *get_osabi_name_from_section_note(ELFOBJ *bin, Elf_(Shdr) * section)
 }
 
 static char *get_osabi_name_from_shdr(ELFOBJ *bin) {
-	if (!bin->shdr || !bin->shstrtab) {
+	if (!bin->shstrtab) {
 		return NULL;
 	}
 
-	for (size_t i = 0; i < bin->ehdr.e_shnum; i++) {
-		char *tmp = get_osabi_name_from_section_note(bin, bin->shdr + i);
+	RzBinElfSection *section;
+	rz_bin_elf_foreach_sections(bin, section) {
+		if (!section->is_valid) {
+			continue;
+		}
+
+		char *tmp = get_osabi_name_from_section_note(bin, section);
 		if (tmp) {
 			return tmp;
 		}
@@ -873,70 +865,88 @@ static char *get_abi_mips(ELFOBJ *bin) {
 RZ_OWN RzBinElfLib *Elf_(rz_bin_elf_get_libs)(RZ_NONNULL ELFOBJ *bin) {
 	rz_return_val_if_fail(bin, NULL);
 
-	if (!bin || !bin->phdr || !bin->strtab || bin->strtab[1] == '\0') {
+	if (!Elf_(rz_bin_elf_has_segments)(bin) || !Elf_(rz_bin_elf_has_dt_dynamic)(bin) || !bin->dynstr) {
 		return NULL;
 	}
 
-	RzBinElfLib *ret = RZ_NEWS(RzBinElfLib, rz_vector_len(&bin->dyn_info.dt_needed) + 1);
+	RzVector *dt_needed = Elf_(rz_bin_elf_get_dt_needed)(bin);
+	if (!dt_needed) {
+		return NULL;
+	}
+
+	RzBinElfLib *ret = RZ_NEWS(RzBinElfLib, rz_vector_len(dt_needed) + 1);
 	if (!ret) {
 		return NULL;
 	}
 
-	return get_libs_from_dt_dynamic(bin, ret);
+	size_t i = 0;
+	Elf_(Word) *iter = NULL;
+	rz_vector_enumerate(dt_needed, iter, i) {
+		if (!Elf_(rz_bin_elf_strtab_get)(bin->dynstr, ret[i].name, *iter)) {
+			free(ret);
+			return NULL;
+		}
+
+		ret[i].last = 0;
+	}
+
+	ret[i].last = 1;
+
+	return ret;
 }
 
-static Elf_(Verdaux) get_verdaux_entry(ELFOBJ *bin, ut64 offset) {
-	Elf_(Verdaux) verdaux_entry;
+static bool get_verdaux_entry(ELFOBJ *bin, ut64 offset, Elf_(Verdaux) * entry) {
+	if (!Elf_(rz_bin_elf_read_word)(bin, &offset, &entry->vda_name) ||
+		!Elf_(rz_bin_elf_read_word)(bin, &offset, &entry->vda_next)) {
+		return false;
+	}
 
-	verdaux_entry.vda_name = BREAD32(bin->b, offset);
-	verdaux_entry.vda_next = BREAD32(bin->b, offset);
-
-	return verdaux_entry;
+	return true;
 }
 
-static Elf_(Verdef) get_verdef_entry(ELFOBJ *bin, ut64 offset) {
-	Elf_(Verdef) verdef_entry;
+static bool get_verdef_entry(ELFOBJ *bin, ut64 offset, Elf_(Verdef) * entry) {
+	if (!Elf_(rz_bin_elf_read_half)(bin, &offset, &entry->vd_version) ||
+		!Elf_(rz_bin_elf_read_half)(bin, &offset, &entry->vd_flags) ||
+		!Elf_(rz_bin_elf_read_half)(bin, &offset, &entry->vd_ndx) ||
+		!Elf_(rz_bin_elf_read_half)(bin, &offset, &entry->vd_cnt) ||
+		!Elf_(rz_bin_elf_read_word)(bin, &offset, &entry->vd_hash) ||
+		!Elf_(rz_bin_elf_read_word)(bin, &offset, &entry->vd_aux) ||
+		!Elf_(rz_bin_elf_read_word)(bin, &offset, &entry->vd_next)) {
+		return false;
+	}
 
-	verdef_entry.vd_version = BREAD16(bin->b, offset);
-	verdef_entry.vd_flags = BREAD16(bin->b, offset);
-	verdef_entry.vd_ndx = BREAD16(bin->b, offset);
-	verdef_entry.vd_cnt = BREAD16(bin->b, offset);
-	verdef_entry.vd_hash = BREAD32(bin->b, offset);
-	verdef_entry.vd_aux = BREAD32(bin->b, offset);
-	verdef_entry.vd_next = BREAD32(bin->b, offset);
-
-	return verdef_entry;
+	return true;
 }
 
-static Elf_(Vernaux) get_vernaux_entry(ELFOBJ *bin, ut64 offset) {
-	Elf_(Vernaux) vernaux_entry;
+static bool get_vernaux_entry(ELFOBJ *bin, ut64 offset, Elf_(Vernaux) * entry) {
+	if (!Elf_(rz_bin_elf_read_word)(bin, &offset, &entry->vna_hash) ||
+		!Elf_(rz_bin_elf_read_half)(bin, &offset, &entry->vna_flags) ||
+		!Elf_(rz_bin_elf_read_half)(bin, &offset, &entry->vna_other) ||
+		!Elf_(rz_bin_elf_read_word)(bin, &offset, &entry->vna_name) ||
+		!Elf_(rz_bin_elf_read_word)(bin, &offset, &entry->vna_next)) {
+		return false;
+	}
 
-	vernaux_entry.vna_hash = BREAD32(bin->b, offset);
-	vernaux_entry.vna_flags = BREAD16(bin->b, offset);
-	vernaux_entry.vna_other = BREAD16(bin->b, offset);
-	vernaux_entry.vna_name = BREAD32(bin->b, offset);
-	vernaux_entry.vna_next = BREAD32(bin->b, offset);
-
-	return vernaux_entry;
+	return true;
 }
 
-static Elf_(Verneed) get_verneed_entry(ELFOBJ *bin, ut64 offset) {
-	Elf_(Verneed) verneed_entry;
+static bool get_verneed_entry(ELFOBJ *bin, ut64 offset, Elf_(Verneed) * entry) {
+	if (!Elf_(rz_bin_elf_read_half)(bin, &offset, &entry->vn_version) ||
+		!Elf_(rz_bin_elf_read_half)(bin, &offset, &entry->vn_cnt) ||
+		!Elf_(rz_bin_elf_read_word)(bin, &offset, &entry->vn_file) ||
+		!Elf_(rz_bin_elf_read_word)(bin, &offset, &entry->vn_aux) ||
+		!Elf_(rz_bin_elf_read_word)(bin, &offset, &entry->vn_next)) {
+		return false;
+	}
 
-	verneed_entry.vn_version = BREAD16(bin->b, offset);
-	verneed_entry.vn_cnt = BREAD16(bin->b, offset);
-	verneed_entry.vn_file = BREAD32(bin->b, offset);
-	verneed_entry.vn_aux = BREAD32(bin->b, offset);
-	verneed_entry.vn_next = BREAD32(bin->b, offset);
-
-	return verneed_entry;
+	return true;
 }
 
 static bool get_versym_entry_sdb_from_verneed(ELFOBJ *bin, Sdb *sdb, const char *key, Elf_(Versym) versym) {
-	ut64 verneed_addr = bin->version_info[DT_VERSIONTAGIDX(DT_VERNEED)];
-	ut64 verneed_num = bin->version_info[DT_VERSIONTAGIDX(DT_VERNEEDNUM)];
+	ut64 verneed_addr;
+	ut64 verneed_num;
 
-	if (!verneed_addr || !verneed_num) {
+	if (!Elf_(rz_bin_elf_get_dt_info)(bin, DT_VERNEED, &verneed_addr) || !Elf_(rz_bin_elf_get_dt_info)(bin, DT_VERNEEDNUM, &verneed_num)) {
 		return false;
 	}
 
@@ -949,23 +959,29 @@ static bool get_versym_entry_sdb_from_verneed(ELFOBJ *bin, Sdb *sdb, const char 
 	ut64 verneed_entry_offset = verneed_offset;
 
 	for (size_t i = 0; i < verneed_num; i++) {
-		Elf_(Verneed) verneed_entry = get_verneed_entry(bin, verneed_entry_offset);
+		Elf_(Verneed) verneed_entry;
+		if (!get_verneed_entry(bin, verneed_entry_offset, &verneed_entry)) {
+			return false;
+		}
 
 		ut64 vernaux_entry_offset = verneed_entry_offset + verneed_entry.vn_aux;
 
 		for (size_t j = 0; j < verneed_entry.vn_cnt; j++) {
-			Elf_(Vernaux) vernaux_entry = get_vernaux_entry(bin, vernaux_entry_offset);
+			Elf_(Vernaux) vernaux_entry;
+			if (!get_vernaux_entry(bin, vernaux_entry_offset, &vernaux_entry)) {
+				return false;
+			}
 
 			if (vernaux_entry.vna_other != versym) {
 				vernaux_entry_offset += vernaux_entry.vna_next;
 				continue;
 			}
 
-			if (vernaux_entry.vna_name > bin->strtab_size) {
+			char tmp[ELF_STRING_LENGTH];
+			if (!Elf_(rz_bin_elf_strtab_get)(bin->dynstr, tmp, vernaux_entry.vna_name)) {
 				return false;
 			}
-
-			const char *value = sdb_fmt("%u (%s)", versym & VERSYM_VERSION, bin->strtab + vernaux_entry.vna_name);
+			const char *value = sdb_fmt("%u (%s)", versym & VERSYM_VERSION, tmp);
 			sdb_set(sdb, key, value, 0);
 
 			return true;
@@ -978,10 +994,10 @@ static bool get_versym_entry_sdb_from_verneed(ELFOBJ *bin, Sdb *sdb, const char 
 }
 
 static bool get_versym_entry_sdb_from_verdef(ELFOBJ *bin, Sdb *sdb, const char *key, Elf_(Versym) versym) {
-	ut64 verdef_addr = bin->version_info[DT_VERSIONTAGIDX(DT_VERDEF)];
-	ut64 verdef_num = bin->version_info[DT_VERSIONTAGIDX(DT_VERDEFNUM)];
+	ut64 verdef_addr;
+	ut64 verdef_num;
 
-	if (!verdef_addr || !verdef_num) {
+	if (!Elf_(rz_bin_elf_get_dt_info)(bin, DT_VERDEF, &verdef_addr) || !Elf_(rz_bin_elf_get_dt_info)(bin, DT_VERDEFNUM, &verdef_num)) {
 		return false;
 	}
 
@@ -994,7 +1010,10 @@ static bool get_versym_entry_sdb_from_verdef(ELFOBJ *bin, Sdb *sdb, const char *
 	ut64 verdef_entry_offset = verdef_offset;
 
 	for (size_t i = 0; i < verdef_num; i++) {
-		Elf_(Verdef) verdef_entry = get_verdef_entry(bin, verdef_entry_offset);
+		Elf_(Verdef) verdef_entry;
+		if (!get_verdef_entry(bin, verdef_entry_offset, &verdef_entry)) {
+			return false;
+		}
 
 		if (!verdef_entry.vd_cnt || verdef_entry.vd_ndx != (versym & VERSYM_VERSION)) {
 			verdef_entry_offset += verdef_entry.vd_next;
@@ -1002,14 +1021,17 @@ static bool get_versym_entry_sdb_from_verdef(ELFOBJ *bin, Sdb *sdb, const char *
 		}
 
 		ut64 verdaux_entry_offset = verdef_entry_offset + verdef_entry.vd_aux;
-		Elf_(Verdaux) verdaux_entry = get_verdaux_entry(bin, verdaux_entry_offset);
 
-		if (verdaux_entry.vda_name > bin->strtab_size) {
+		Elf_(Verdaux) verdaux_entry;
+		if (!get_verdaux_entry(bin, verdaux_entry_offset, &verdaux_entry)) {
 			return false;
 		}
 
-		const char *name = bin->strtab + verdaux_entry.vda_name;
-		const char *value = sdb_fmt("%u (%s%-*s)", versym & VERSYM_VERSION, name, (int)(12 - strlen(name)), ")");
+		char tmp[ELF_STRING_LENGTH];
+		if (!Elf_(rz_bin_elf_strtab_get)(bin->dynstr, tmp, verdaux_entry.vda_name)) {
+			return false;
+		}
+		const char *value = sdb_fmt("%u (%s)", versym & VERSYM_VERSION, tmp);
 		sdb_set(sdb, key, value, 0);
 
 		return true;
@@ -1019,10 +1041,10 @@ static bool get_versym_entry_sdb_from_verdef(ELFOBJ *bin, Sdb *sdb, const char *
 }
 
 static Sdb *get_version_info_gnu_versym(ELFOBJ *bin) {
-	ut64 versym_addr = bin->version_info[DT_VERSIONTAGIDX(DT_VERSYM)];
+	ut64 versym_addr;
 
-	if (!versym_addr) {
-		return NULL;
+	if (!Elf_(rz_bin_elf_get_dt_info)(bin, DT_VERSYM, &versym_addr)) {
+		return false;
 	}
 
 	ut64 versym_offset = Elf_(rz_bin_elf_v2p_new(bin, versym_addr));
@@ -1049,7 +1071,11 @@ static Sdb *get_version_info_gnu_versym(ELFOBJ *bin) {
 
 	for (size_t i = 0; i < number_of_symbols; i++) {
 		const char *key = sdb_fmt("entry%zu", i);
-		Elf_(Versym) versym_entry = BREAD16(bin->b, versym_entry_offset);
+
+		Elf_(Versym) versym_entry;
+		if (!Elf_(rz_bin_elf_read_versym)(bin, &versym_entry_offset, &versym_entry)) {
+			return false;
+		}
 
 		switch (versym_entry) {
 		case VER_NDX_LOCAL:
@@ -1071,7 +1097,8 @@ static Sdb *get_version_info_gnu_versym(ELFOBJ *bin) {
 }
 
 static Sdb *get_verdaux_entry_sdb(ELFOBJ *bin, Elf_(Verdaux) * verdaux_entry, size_t index) {
-	if (verdaux_entry->vda_name > bin->dynstr_size) {
+	char tmp[ELF_STRING_LENGTH];
+	if (!Elf_(rz_bin_elf_strtab_get)(bin->dynstr, tmp, verdaux_entry->vda_name)) {
 		return NULL;
 	}
 
@@ -1081,7 +1108,7 @@ static Sdb *get_verdaux_entry_sdb(ELFOBJ *bin, Elf_(Verdaux) * verdaux_entry, si
 	}
 
 	sdb_num_set(sdb_verdaux, "idx", index, 0);
-	sdb_set(sdb_verdaux, "vda_name", bin->dynstr + verdaux_entry->vda_name, 0);
+	sdb_set(sdb_verdaux, "vda_name", tmp, 0);
 
 	return sdb_verdaux;
 }
@@ -1112,7 +1139,11 @@ static Sdb *get_verdef_entry_sdb(ELFOBJ *bin, Elf_(Verdef) * verdef_entry, size_
 	ut64 verdaux_entry_offset = offset + verdef_entry->vd_aux;
 
 	for (size_t j = 0; j < verdef_entry->vd_cnt; j++) {
-		Elf_(Verdaux) verdaux_entry = get_verdaux_entry(bin, verdaux_entry_offset);
+		Elf_(Verdaux) verdaux_entry;
+		if (!get_verdaux_entry(bin, verdaux_entry_offset, &verdaux_entry)) {
+			sdb_free(sdb_verdef);
+			return NULL;
+		}
 
 		Sdb *sdb_verdaux = get_verdaux_entry_sdb(bin, &verdaux_entry, verdaux_entry_offset);
 		if (!sdb_verdaux) {
@@ -1132,10 +1163,10 @@ static Sdb *get_verdef_entry_sdb(ELFOBJ *bin, Elf_(Verdef) * verdef_entry, size_
 static Sdb *get_version_info_gnu_verdef(ELFOBJ *bin) {
 	rz_return_val_if_fail(bin, NULL);
 
-	ut64 verdef_addr = bin->version_info[DT_VERSIONTAGIDX(DT_VERDEF)];
-	ut64 verdef_num = bin->version_info[DT_VERSIONTAGIDX(DT_VERDEFNUM)];
+	ut64 verdef_addr;
+	ut64 verdef_num;
 
-	if (!verdef_addr || !verdef_num) {
+	if (!Elf_(rz_bin_elf_get_dt_info)(bin, DT_VERDEF, &verdef_addr) || !Elf_(rz_bin_elf_get_dt_info)(bin, DT_VERDEFNUM, &verdef_num)) {
 		return NULL;
 	}
 
@@ -1155,7 +1186,11 @@ static Sdb *get_version_info_gnu_verdef(ELFOBJ *bin) {
 	sdb_num_set(sdb, "offset", verdef_offset, 0);
 
 	for (size_t i = 0; i < verdef_num; i++) {
-		Elf_(Verdef) verdef_entry = get_verdef_entry(bin, verdef_offset);
+		Elf_(Verdef) verdef_entry;
+		if (!get_verdef_entry(bin, verdef_offset, &verdef_entry)) {
+			sdb_free(sdb);
+			return NULL;
+		}
 
 		Sdb *sdb_verdef = get_verdef_entry_sdb(bin, &verdef_entry, verdef_offset);
 		if (!sdb_verdef) {
@@ -1173,7 +1208,8 @@ static Sdb *get_version_info_gnu_verdef(ELFOBJ *bin) {
 }
 
 static Sdb *get_vernaux_entry_sdb(ELFOBJ *bin, Elf_(Vernaux) vernaux_entry, size_t index) {
-	if (vernaux_entry.vna_name > bin->dynstr_size) {
+	char tmp[ELF_STRING_LENGTH];
+	if (!Elf_(rz_bin_elf_strtab_get)(bin->dynstr, tmp, vernaux_entry.vna_name)) {
 		return NULL;
 	}
 
@@ -1188,13 +1224,14 @@ static Sdb *get_vernaux_entry_sdb(ELFOBJ *bin, Elf_(Vernaux) vernaux_entry, size
 
 	sdb_num_set(sdb_vernaux, "idx", index, 0);
 	sdb_num_set(sdb_vernaux, "version", vernaux_entry.vna_other, 0);
-	sdb_set(sdb_vernaux, "name", bin->dynstr + vernaux_entry.vna_name, 0);
+	sdb_set(sdb_vernaux, "name", tmp, 0);
 
 	return sdb_vernaux;
 }
 
 static Sdb *get_verneed_entry_sdb_aux(ELFOBJ *bin, Elf_(Verneed) verneed_entry, size_t index) {
-	if (verneed_entry.vn_file > bin->dynstr_size) {
+	char tmp[ELF_STRING_LENGTH];
+	if (!Elf_(rz_bin_elf_strtab_get)(bin->dynstr, tmp, verneed_entry.vn_file)) {
 		return NULL;
 	}
 
@@ -1206,7 +1243,7 @@ static Sdb *get_verneed_entry_sdb_aux(ELFOBJ *bin, Elf_(Verneed) verneed_entry, 
 	sdb_num_set(sdb_version, "cnt", verneed_entry.vn_cnt, 0);
 	sdb_num_set(sdb_version, "idx", index, 0);
 	sdb_num_set(sdb_version, "vn_version", verneed_entry.vn_version, 0);
-	sdb_set(sdb_version, "file_name", bin->dynstr + verneed_entry.vn_file, 0);
+	sdb_set(sdb_version, "file_name", tmp, 0);
 
 	return sdb_version;
 }
@@ -1220,7 +1257,11 @@ static Sdb *get_verneed_entry_sdb(ELFOBJ *bin, Elf_(Verneed) verneed_entry, size
 	ut64 vernaux_entry_offset = offset + verneed_entry.vn_aux;
 
 	for (size_t i = 0; i < verneed_entry.vn_cnt; i++) {
-		Elf_(Vernaux) vernaux_entry = get_vernaux_entry(bin, vernaux_entry_offset);
+		Elf_(Vernaux) vernaux_entry;
+		if (!get_vernaux_entry(bin, vernaux_entry_offset, &vernaux_entry)) {
+			sdb_free(sdb_version);
+			return NULL;
+		}
 
 		Sdb *sdb_vernaux = get_vernaux_entry_sdb(bin, vernaux_entry, vernaux_entry_offset);
 		if (!sdb_vernaux) {
@@ -1238,10 +1279,10 @@ static Sdb *get_verneed_entry_sdb(ELFOBJ *bin, Elf_(Verneed) verneed_entry, size
 }
 
 static Sdb *get_version_info_gnu_verneed(ELFOBJ *bin) {
-	ut64 verneed_addr = bin->version_info[DT_VERSIONTAGIDX(DT_VERNEED)];
-	ut64 verneed_num = bin->version_info[DT_VERSIONTAGIDX(DT_VERNEEDNUM)];
+	ut64 verneed_addr;
+	ut64 verneed_num;
 
-	if (!verneed_addr || !verneed_num) {
+	if (!Elf_(rz_bin_elf_get_dt_info)(bin, DT_VERNEED, &verneed_addr) || !Elf_(rz_bin_elf_get_dt_info)(bin, DT_VERNEEDNUM, &verneed_num)) {
 		return NULL;
 	}
 
@@ -1261,7 +1302,11 @@ static Sdb *get_version_info_gnu_verneed(ELFOBJ *bin) {
 	sdb_num_set(sdb, "offset", verneed_offset, 0);
 
 	for (size_t i = 0; i < verneed_num; i++) {
-		Elf_(Verneed) verneed_entry = get_verneed_entry(bin, verneed_offset);
+		Elf_(Verneed) verneed_entry;
+		if (!get_verneed_entry(bin, verneed_offset, &verneed_entry)) {
+			sdb_free(sdb);
+			return NULL;
+		}
 
 		Sdb *sdb_version = get_verneed_entry_sdb(bin, verneed_entry, verneed_offset);
 		if (!sdb_version) {
@@ -1280,6 +1325,10 @@ static Sdb *get_version_info_gnu_verneed(ELFOBJ *bin) {
 
 RZ_IPI RZ_OWN Sdb *Elf_(rz_bin_elf_get_version_info)(RZ_NONNULL ELFOBJ *bin) {
 	rz_return_val_if_fail(bin, false);
+
+	if (!Elf_(rz_bin_elf_has_dt_dynamic)(bin) || !bin->dynstr) {
+		return NULL;
+	}
 
 	Sdb *res = sdb_new0();
 	if (!res) {
@@ -1311,7 +1360,11 @@ RZ_IPI RZ_OWN Sdb *Elf_(rz_bin_elf_get_version_info)(RZ_NONNULL ELFOBJ *bin) {
 RZ_OWN char *Elf_(rz_bin_elf_get_compiler)(RZ_NONNULL ELFOBJ *bin) {
 	rz_return_val_if_fail(bin, NULL);
 
-	RzBinElfSection *section = Elf_(rz_bin_elf_get_section)(bin, ".comment");
+	if (!Elf_(rz_bin_elf_has_sections)(bin)) {
+		return NULL;
+	}
+
+	RzBinElfSection *section = Elf_(rz_bin_elf_get_section_with_name)(bin, ".comment");
 	if (!section) {
 		return NULL;
 	}
@@ -1394,7 +1447,7 @@ RZ_OWN char *Elf_(rz_bin_elf_get_arch)(RZ_NONNULL ELFOBJ *bin) {
 RZ_OWN char *Elf_(rz_bin_elf_get_cpu)(RZ_NONNULL ELFOBJ *bin) {
 	rz_return_val_if_fail(bin, NULL);
 
-	if (!bin->phdr) {
+	if (!Elf_(rz_bin_elf_has_segments)(bin)) {
 		return NULL;
 	}
 
@@ -1522,16 +1575,12 @@ RZ_OWN char *Elf_(rz_bin_elf_get_osabi_name)(RZ_NONNULL ELFOBJ *bin) {
 RZ_OWN char *Elf_(rz_bin_elf_get_rpath)(RZ_NONNULL ELFOBJ *bin) {
 	rz_return_val_if_fail(bin, NULL);
 
-	if (!bin->phdr || !bin->strtab || !has_dt_rpath_entry(bin)) {
+	if (!Elf_(rz_bin_elf_has_segments)(bin) || !bin->dynstr || !has_dt_rpath_entry(bin)) {
 		return NULL;
 	}
 
 	Elf_(Xword) val = get_dt_rpath(bin);
-	if (val > bin->strtab_size) {
-		return NULL;
-	}
-
-	return rz_str_ndup(bin->strtab + val, ELF_STRING_LENGTH);
+	return Elf_(rz_bin_elf_strtab_get_dup)(bin->dynstr, val);
 }
 
 /**
@@ -1544,17 +1593,16 @@ RZ_OWN char *Elf_(rz_bin_elf_get_rpath)(RZ_NONNULL ELFOBJ *bin) {
 RZ_OWN char *Elf_(rz_bin_elf_get_intrp)(RZ_NONNULL ELFOBJ *bin) {
 	rz_return_val_if_fail(bin, NULL);
 
-	if (!bin->phdr) {
+	if (!Elf_(rz_bin_elf_has_segments)(bin)) {
 		return NULL;
 	}
 
-	for (size_t i = 0; i < bin->ehdr.e_phnum; i++) {
-		if (bin->phdr[i].p_type == PT_INTERP) {
-			return get_elf_intrp(bin, i);
-		}
+	RzBinElfSegment *segment = Elf_(rz_bin_elf_get_segment_with_type)(bin, PT_INTERP);
+	if (!segment || !segment->is_valid) {
+		return NULL;
 	}
 
-	return NULL;
+	return get_elf_intrp(bin, segment);
 }
 
 /**
@@ -1568,12 +1616,13 @@ RZ_OWN char *Elf_(rz_bin_elf_get_intrp)(RZ_NONNULL ELFOBJ *bin) {
 bool Elf_(rz_bin_elf_is_stripped)(RZ_NONNULL ELFOBJ *bin) {
 	rz_return_val_if_fail(bin, false);
 
-	if (!bin->shdr) {
+	if (!Elf_(rz_bin_elf_has_sections)(bin)) {
 		return false;
 	}
 
-	for (size_t i = 0; i < bin->ehdr.e_shnum; i++) {
-		if (bin->shdr[i].sh_type == SHT_SYMTAB) {
+	RzBinElfSection *section;
+	rz_bin_elf_foreach_sections(bin, section) {
+		if (section->type == SHT_SYMTAB) {
 			return false;
 		}
 	}
@@ -1591,17 +1640,16 @@ bool Elf_(rz_bin_elf_is_stripped)(RZ_NONNULL ELFOBJ *bin) {
 bool Elf_(rz_bin_elf_has_nx)(RZ_NONNULL ELFOBJ *bin) {
 	rz_return_val_if_fail(bin, false);
 
-	if (!bin->phdr) {
+	if (!Elf_(rz_bin_elf_has_segments)(bin)) {
 		return false;
 	}
 
-	for (size_t i = 0; i < bin->ehdr.e_phnum; i++) {
-		if (bin->phdr[i].p_type == PT_GNU_STACK) {
-			return !(bin->phdr[i].p_flags & PF_X);
-		}
+	RzBinElfSegment *segment = Elf_(rz_bin_elf_get_segment_with_type)(bin, PT_GNU_STACK);
+	if (!segment || !segment->is_valid) {
+		return false;
 	}
 
-	return false;
+	return !(segment->data.p_flags & PF_X);
 }
 
 /**
@@ -1651,14 +1699,18 @@ bool Elf_(rz_bin_elf_is_relocatable)(RZ_NONNULL ELFOBJ *bin) {
 bool Elf_(rz_bin_elf_is_static)(RZ_NONNULL ELFOBJ *bin) {
 	rz_return_val_if_fail(bin, false);
 
-	if (!bin->phdr) {
+	if (!Elf_(rz_bin_elf_has_segments)(bin)) {
 		return false;
 	}
 
-	for (size_t i = 0; i < bin->ehdr.e_phnum; i++) {
-		if (bin->phdr[i].p_type == PT_INTERP || bin->phdr[i].p_type == PT_DYNAMIC) {
-			return false;
-		}
+	RzBinElfSegment *segment = Elf_(rz_bin_elf_get_segment_with_type)(bin, PT_INTERP);
+	if (segment && segment->is_valid) {
+		return false;
+	}
+
+	segment = Elf_(rz_bin_elf_get_segment_with_type)(bin, PT_DYNAMIC);
+	if (segment && segment->is_valid) {
+		return false;
 	}
 
 	return true;
@@ -1752,7 +1804,7 @@ ut64 Elf_(rz_bin_elf_get_baddr)(RZ_NONNULL ELFOBJ *bin) {
 		return 0x08000000;
 	}
 
-	if (bin->phdr) {
+	if (Elf_(rz_bin_elf_has_segments)(bin)) {
 		return compute_baddr_from_phdr(bin);
 	}
 
@@ -1771,7 +1823,7 @@ ut64 Elf_(rz_bin_elf_get_baddr)(RZ_NONNULL ELFOBJ *bin) {
 ut64 Elf_(rz_bin_elf_get_boffset)(RZ_NONNULL ELFOBJ *bin) {
 	rz_return_val_if_fail(bin, 0);
 
-	if (bin->phdr) {
+	if (Elf_(rz_bin_elf_has_segments)(bin)) {
 		return compute_boffset_from_phdr(bin);
 	}
 
@@ -1816,11 +1868,17 @@ ut64 Elf_(rz_bin_elf_get_entry_offset)(RZ_NONNULL ELFOBJ *bin) {
 ut64 Elf_(rz_bin_elf_get_fini_offset)(RZ_NONNULL ELFOBJ *bin) {
 	rz_return_val_if_fail(bin, 0);
 
-	if (!bin->dyn_info.dt_fini) {
+	ut64 addr;
+
+	if (!Elf_(rz_bin_elf_has_dt_dynamic)(bin)) {
 		return 0;
 	}
 
-	return Elf_(rz_bin_elf_v2p_new)(bin, bin->dyn_info.dt_fini);
+	if (!Elf_(rz_bin_elf_get_dt_info)(bin, DT_FINI, &addr)) {
+		return 0;
+	}
+
+	return Elf_(rz_bin_elf_v2p_new)(bin, addr);
 }
 
 /**
@@ -1833,11 +1891,17 @@ ut64 Elf_(rz_bin_elf_get_fini_offset)(RZ_NONNULL ELFOBJ *bin) {
 ut64 Elf_(rz_bin_elf_get_init_offset)(RZ_NONNULL ELFOBJ *bin) {
 	rz_return_val_if_fail(bin, 0);
 
-	if (!bin->dyn_info.dt_init) {
+	ut64 addr;
+
+	if (!Elf_(rz_bin_elf_has_dt_dynamic)(bin)) {
 		return 0;
 	}
 
-	return Elf_(rz_bin_elf_v2p_new)(bin, bin->dyn_info.dt_init);
+	if (!Elf_(rz_bin_elf_get_dt_info)(bin, DT_INIT, &addr)) {
+		return 0;
+	}
+
+	return Elf_(rz_bin_elf_v2p_new)(bin, addr);
 }
 
 /**

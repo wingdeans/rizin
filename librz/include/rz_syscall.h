@@ -92,6 +92,7 @@ RZ_API RzSyscallItem *rz_syscall_item_new_from_string(const char *name, const ch
 RZ_API void rz_syscall_item_free(RzSyscallItem *si);
 
 RZ_API RzSyscall *rz_syscall_new(void);
+RZ_API void rz_sysregs_db_free(RzSysregsDB *sysregdb);
 RZ_API void rz_syscall_free(RzSyscall *ctx);
 RZ_API RzSyscall *rz_syscall_ref(RzSyscall *sc);
 RZ_API bool rz_syscall_setup(RzSyscall *s, const char *arch, int bits, const char *cpu, const char *os);
@@ -103,7 +104,7 @@ RZ_API int rz_syscall_get_swi(RzSyscall *s);
 
 RZ_API const char *rz_sysreg_get(RzSyscall *s, const char *type, ut64 num);
 RZ_API bool rz_sysreg_set_arch(RzSyscall *s, const char *arch, const char *dir_prefix);
-RZ_API bool rz_type_db_load_sysregs_sdb(RzSysregsDB *sysregdb, const char *path);
+RZ_API bool rz_sysreg_load_sdb(RzSysregsDB *sysregdb, const char *path);
 RZ_API RzSysregsDB *rz_sysregs_db_new();
 RZ_API RZ_OWN RzSysregItem *rz_sysreg_item_new(RZ_NULLABLE const char *name);
 RZ_API void rz_sysreg_item_free(RzSysregItem *sysregitem);
