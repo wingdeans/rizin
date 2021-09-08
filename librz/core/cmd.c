@@ -4530,7 +4530,7 @@ DEFINE_HANDLE_TS_FCN_AND_SYMBOL(arged_stmt) {
 			}
 			RzCmdParsedArgs *help_pra = rz_cmd_parsed_args_newcmd(cmdname_help);
 			if (!help_pra) {
-				goto err;
+				goto cmdname_help_err;
 			}
 			bool use_color = state->core->print->flags & RZ_PRINT_FLAGS_COLOR;
 			char *help_msg = rz_cmd_get_help(state->core->rcmd, help_pra, use_color);
@@ -4541,6 +4541,8 @@ DEFINE_HANDLE_TS_FCN_AND_SYMBOL(arged_stmt) {
 			free(help_msg);
 		help_pra_err:
 			rz_cmd_parsed_args_free(help_pra);
+		cmdname_help_err:
+			free(cmdname_help);
 		}
 	} else if (res == RZ_CMD_STATUS_NONEXISTINGCMD) {
 		const char *cmdname = rz_cmd_parsed_args_cmd(pr_args);
