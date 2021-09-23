@@ -1,10 +1,7 @@
 // SPDX-FileCopyrightText: 2021 RizinOrg <info@rizin.re>
 // SPDX-License-Identifier: LGPL-3.0-only
 
-#include <rz_types.h>
-#include <rz_util.h>
 #include <rz_arch.h>
-#include <stdio.h>
 #include <string.h>
 
 /**
@@ -52,15 +49,9 @@ RZ_API RZ_OWN RzArchTarget *rz_arch_target_new() {
 	if (!profile) {
 		return NULL;
 	}
-	profile->db = sdb_new0();
-	if (!profile->db) {
-		free(profile);
-		return NULL;
-	}
 	profile->profile = rz_arch_profile_new();
 	if (!profile->profile) {
 		free(profile);
-		sdb_free(profile->db);
 		return NULL;
 	}
 	return profile;
@@ -75,9 +66,26 @@ RZ_API void rz_arch_target_free(RzArchTarget *t) {
 	if (!t) {
 		return;
 	}
-	sdb_free(t->db);
 	rz_arch_profile_free(t->profile);
 	free(t);
+}
+
+/**
+ * \brief Resolves an address and returns the linked mmio
+ */
+RZ_API RZ_BORROW const char *rz_arch_profile_resolve_mmio(RZ_NONNULL RzArchProfile *profile, ut64 address) {
+	rz_return_val_if_fail(profile, NULL);
+
+	return ht_up_find(profile->registers_mmio, (ut64)address, NULL);
+}
+
+/**
+ * \brief Resolves an address and returns the linked extended register
+ */
+RZ_API RZ_BORROW const char *rz_arch_profile_resolve_extended_register(RZ_NONNULL RzArchProfile *profile, ut64 address) {
+	rz_return_val_if_fail(profile, NULL);
+
+	return ht_up_find(profile->registers_extended, (ut64)address, NULL);
 }
 
 static inline bool cpu_reload_needed(RzArchTarget *c, const char *cpu, const char *arch) {
@@ -88,7 +96,7 @@ static inline bool cpu_reload_needed(RzArchTarget *c, const char *cpu, const cha
 }
 
 static bool sdb_load_arch_profile(RzArchTarget *t, Sdb *sdb) {
-	rz_return_val_if_fail(t && sdb, NULL);
+	rz_return_val_if_fail(t && sdb, false);
 	SdbKv *kv;
 	SdbListIter *iter;
 	SdbList *l = sdb_foreach_list(sdb, false);
@@ -171,6 +179,7 @@ static bool is_cpu_valid(char *cpu_dir, const char *cpu) {
 		}
 		cpu_name = strchr(arch_cpu, '-');
 		if (!cpu_name) {
+			free(arch_cpu);
 			continue;
 		}
 		cpu_name[0] = '\0';
@@ -179,9 +188,11 @@ static bool is_cpu_valid(char *cpu_dir, const char *cpu) {
 			free(arch_cpu);
 			return true;
 		}
+
+		free(arch_cpu);
 	}
+
 	rz_list_free(files);
-	free(arch_cpu);
 	return false;
 }
 
@@ -191,11 +202,14 @@ static bool is_cpu_valid(char *cpu_dir, const char *cpu) {
  *
  * \param t reference to RzArchTarget
  * \param cpu reference to the selected CPU (value of `asm.cpu`)
- * \param arch reference to the seletec architecture (value of `asm.arch`)
+ * \param arch reference to the selected architecture (value of `asm.arch`)
  * \param dir_prefix reference to the directory prefix or the value of dir.prefix
  */
 RZ_API bool rz_arch_profiles_init(RzArchTarget *t, const char *cpu, const char *arch, const char *dir_prefix) {
 	if (!cpu_reload_needed(t, cpu, arch)) {
+		return false;
+	}
+	if (!dir_prefix || !arch || !cpu) {
 		return false;
 	}
 	char *path = rz_str_newf(RZ_JOIN_4_PATHS("%s", RZ_SDB, "asm/cpus", "%s-%s.sdb"),
@@ -211,10 +225,7 @@ RZ_API bool rz_arch_profiles_init(RzArchTarget *t, const char *cpu, const char *
 			path = rz_str_newf("%s" RZ_SYS_DIR RZ_SDB RZ_SYS_DIR "asm" RZ_SYS_DIR "cpus" RZ_SYS_DIR "avr-ATmega8.sdb", dir_prefix);
 		}
 	}
-	if (!rz_arch_load_profile_sdb(t, path)) {
-		sdb_free(t->db);
-		t->db = NULL;
-	}
+	rz_arch_load_profile_sdb(t, path);
 	free(path);
 	free(cpu_dir);
 	return true;

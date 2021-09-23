@@ -207,16 +207,16 @@ static int rz_line_readchar_utf8(ut8 *s, int slen) {
 
 #if __WINDOWS__
 static int rz_line_readchar_win(ut8 *s, int slen) { // this function handle the input in console mode
-	if (slen > 0 && rz_cons_readbuffer_readchar(s)) {
-		if (s[0] == '\x1b' && rz_cons_readbuffer_readchar(s + 1)) {
-			if (s[1] == '\x31' && rz_cons_readbuffer_readchar(s + 2)) {
+	if (slen > 0 && rz_cons_readbuffer_readchar((char *)s)) {
+		if (s[0] == '\x1b' && rz_cons_readbuffer_readchar((char *)s + 1)) {
+			if (s[1] == '\x31' && rz_cons_readbuffer_readchar((char *)s + 2)) {
 				return 3;
 			}
 			return 2;
 		}
 		return 1;
 	}
-	INPUT_RECORD irInBuf = { { 0 } };
+	INPUT_RECORD irInBuf = { 0 };
 	BOOL ret, bCtrl = FALSE;
 	DWORD mode, out;
 	char buf[5] = { 0 };
@@ -224,7 +224,7 @@ static int rz_line_readchar_win(ut8 *s, int slen) { // this function handle the 
 	void *bed;
 
 	h = GetStdHandle(STD_INPUT_HANDLE);
-	DWORD new_mode = I.vtmode == 2 ? ENABLE_VIRTUAL_TERMINAL_INPUT : 0;
+	DWORD new_mode = I.vtmode == RZ_VIRT_TERM_MODE_COMPLETE ? ENABLE_VIRTUAL_TERMINAL_INPUT : 0;
 	GetConsoleMode(h, &mode);
 	SetConsoleMode(h, new_mode);
 	if (I.zerosep) {
@@ -243,7 +243,7 @@ do_it_again:
 	if (rz_cons_singleton()->term_xterm) {
 		ret = ReadFile(h, buf, 1, &out, NULL);
 	} else {
-		ret = ReadConsoleInput(h, &irInBuf, 1, &out);
+		ret = ReadConsoleInputW(h, &irInBuf, 1, &out);
 	}
 	rz_cons_sleep_end(bed);
 	if (ret < 1) {
@@ -252,7 +252,7 @@ do_it_again:
 	if (irInBuf.EventType == KEY_EVENT) {
 		if (irInBuf.Event.KeyEvent.bKeyDown) {
 			if (irInBuf.Event.KeyEvent.uChar.UnicodeChar) {
-				char *tmp = rz_sys_conv_win_to_utf8_l((PTCHAR)&irInBuf.Event.KeyEvent.uChar, 1);
+				char *tmp = rz_utf16_to_utf8_l(&irInBuf.Event.KeyEvent.uChar.UnicodeChar, 1);
 				if (!tmp) {
 					return 0;
 				}
@@ -446,8 +446,9 @@ RZ_API int rz_line_hist_list(void) {
 	}
 	if (I.history.data) {
 		for (i = 0; i < I.history.size && I.history.data[i]; i++) {
-			const char *pad = rz_str_pad(' ', 32 - strlen(I.history.data[i]));
-			rz_cons_printf("%s %s # !%d\n", I.history.data[i], pad, i);
+			// when you execute a command, you always move the history
+			// by 1 before actually printing it.
+			rz_cons_printf("%5d  %s\n", i + 1, I.history.data[i]);
 		}
 	}
 	return i;
@@ -621,10 +622,7 @@ static void selection_widget_down(int steps) {
 }
 
 static void print_rline_task(void *_core) {
-	RzCore *core = (RzCore *)_core;
-	if (core->cons->context->color_mode) {
-		rz_cons_clear_line(0);
-	}
+	rz_cons_clear_line(0);
 	rz_cons_printf("%s%s%s", Color_RESET, I.prompt, I.buffer.data);
 	rz_cons_flush();
 }
@@ -974,8 +972,8 @@ static void __print_prompt(void) {
 		rz_cons_gotoxy(0, cons->rows);
 		rz_cons_flush();
 	}
+	rz_cons_clear_line(0);
 	if (cons->context->color_mode > 0) {
-		rz_cons_clear_line(0);
 		printf("\r%s%s", Color_RESET, I.prompt);
 	} else {
 		printf("\r%s", I.prompt);
@@ -1331,6 +1329,7 @@ RZ_API const char *rz_line_readline_cb(RzLineReadCallback cb, void *user) {
 	static int gcomp_idx = 0;
 	static bool yank_flag = 0;
 	static int gcomp = 0;
+	static int gcomp_is_rev = true;
 	char buf[10];
 #if USE_UTF8
 	int utflen;
@@ -1414,7 +1413,7 @@ RZ_API const char *rz_line_readline_cb(RzLineReadCallback cb, void *user) {
 #endif
 		bool o_do_setup_match = I.history.do_setup_match;
 		I.history.do_setup_match = true;
-		if (I.echo && cons->context->color_mode) {
+		if (I.echo) {
 			rz_cons_clear_line(0);
 		}
 		(void)rz_cons_get_size(&rows);
@@ -1498,15 +1497,19 @@ RZ_API const char *rz_line_readline_cb(RzLineReadCallback cb, void *user) {
 			}
 			fflush(stdout);
 			break;
-		case 18: // ^R -- autocompletion
+		case 18: // ^R -- reverse-search
 			if (gcomp) {
 				gcomp_idx++;
 			}
+			gcomp_is_rev = true;
 			gcomp = 1;
 			break;
-		case 19: // ^S -- backspace
+		case 19: // ^S -- forward-search
 			if (gcomp) {
-				gcomp--;
+				if (gcomp_idx > 0) {
+					gcomp_idx--;
+				}
+				gcomp_is_rev = false;
 			} else {
 				__move_cursor_left();
 			}
@@ -1525,15 +1528,11 @@ RZ_API const char *rz_line_readline_cb(RzLineReadCallback cb, void *user) {
 			HANDLE hClipBoard;
 			PTCHAR clipText;
 			if (OpenClipboard(NULL)) {
-#if UNICODE
 				hClipBoard = GetClipboardData(CF_UNICODETEXT);
-#else
-				hClipBoard = GetClipboardData(CF_TEXT);
-#endif
 				if (hClipBoard) {
 					clipText = GlobalLock(hClipBoard);
 					if (clipText) {
-						char *txt = rz_sys_conv_win_to_utf8(clipText);
+						char *txt = rz_utf16_to_utf8(clipText);
 						if (!txt) {
 							RZ_LOG_ERROR("Failed to allocate memory\n");
 							break;
@@ -1612,7 +1611,7 @@ RZ_API const char *rz_line_readline_cb(RzLineReadCallback cb, void *user) {
 			break;
 		case 27: // esc-5b-41-00-00 alt/meta key
 #if __WINDOWS__
-			if (I.vtmode != 2) {
+			if (I.vtmode != RZ_VIRT_TERM_MODE_COMPLETE) {
 				memmove(buf, buf + 1, strlen(buf));
 				if (!buf[0]) {
 					buf[0] = -1;
@@ -1674,7 +1673,7 @@ RZ_API const char *rz_line_readline_cb(RzLineReadCallback cb, void *user) {
 				}
 				break;
 			default:
-				if (I.vtmode == 2) {
+				if (I.vtmode == RZ_VIRT_TERM_MODE_COMPLETE) {
 					buf[1] = rz_cons_readchar_timeout(50);
 					if (buf[1] == -1) { // alt+e
 						rz_cons_break_pop();
@@ -1686,7 +1685,7 @@ RZ_API const char *rz_line_readline_cb(RzLineReadCallback cb, void *user) {
 					switch (buf[1]) {
 					case '3': // supr
 						__delete_next_char();
-						if (I.vtmode == 2) {
+						if (I.vtmode == RZ_VIRT_TERM_MODE_COMPLETE) {
 							buf[1] = rz_cons_readchar();
 							if (buf[1] == -1) {
 								rz_cons_break_pop();
@@ -1695,7 +1694,7 @@ RZ_API const char *rz_line_readline_cb(RzLineReadCallback cb, void *user) {
 						}
 						break;
 					case '5': // pag up
-						if (I.vtmode == 2) {
+						if (I.vtmode == RZ_VIRT_TERM_MODE_COMPLETE) {
 							buf[1] = rz_cons_readchar();
 						}
 						if (I.hud) {
@@ -1710,7 +1709,7 @@ RZ_API const char *rz_line_readline_cb(RzLineReadCallback cb, void *user) {
 						}
 						break;
 					case '6': // pag down
-						if (I.vtmode == 2) {
+						if (I.vtmode == RZ_VIRT_TERM_MODE_COMPLETE) {
 							buf[1] = rz_cons_readchar();
 						}
 						if (I.hud) {
@@ -1785,7 +1784,7 @@ RZ_API const char *rz_line_readline_cb(RzLineReadCallback cb, void *user) {
 						__move_cursor_left();
 						break;
 					case 0x31: // control + arrow
-						if (I.vtmode == 2) {
+						if (I.vtmode == RZ_VIRT_TERM_MODE_COMPLETE) {
 							ch = rz_cons_readchar();
 							if (ch == 0x7e) { // HOME in screen/tmux
 								// corresponding END is 0x34 below (the 0x7e is ignored there)
@@ -1834,7 +1833,7 @@ RZ_API const char *rz_line_readline_cb(RzLineReadCallback cb, void *user) {
 							}
 							break;
 						default:
-							if (I.vtmode == 2) {
+							if (I.vtmode == RZ_VIRT_TERM_MODE_COMPLETE) {
 								if (I.cb_fkey) {
 									I.cb_fkey(I.user, fkey);
 								}
@@ -1994,11 +1993,14 @@ RZ_API const char *rz_line_readline_cb(RzLineReadCallback cb, void *user) {
 							}
 						}
 						if (i == 0) {
-							gcomp_idx--;
+							if (gcomp_is_rev) {
+								gcomp_idx--;
+							}
 						}
 					}
 				}
-				printf("\r (reverse-i-search (%s)): %s\r", I.buffer.data, gcomp_line);
+				const char *prompt = gcomp_is_rev ? "reverse-i-search" : "forward-i-search";
+				printf("\r (%s (%s)): %s\r", prompt, I.buffer.data, gcomp_line);
 			} else {
 				__print_prompt();
 			}

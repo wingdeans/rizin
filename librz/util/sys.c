@@ -306,7 +306,7 @@ RZ_API void rz_sys_backtrace(void) {
 }
 
 RZ_API int rz_sys_sleep(int secs) {
-#if HAS_CLOCK_NANOSLEEP
+#if HAVE_CLOCK_NANOSLEEP && defined(CLOCK_MONOTONIC)
 	struct timespec rqtp;
 	rqtp.tv_sec = secs;
 	rqtp.tv_nsec = 0;
@@ -320,7 +320,7 @@ RZ_API int rz_sys_sleep(int secs) {
 }
 
 RZ_API int rz_sys_usleep(int usecs) {
-#if HAS_CLOCK_NANOSLEEP
+#if HAVE_CLOCK_NANOSLEEP && defined(CLOCK_MONOTONIC)
 	struct timespec rqtp;
 	rqtp.tv_sec = usecs / 1000000;
 	rqtp.tv_nsec = (usecs - (rqtp.tv_sec * 1000000)) * 1000;
@@ -508,7 +508,7 @@ RZ_API char *rz_sys_getdir(void) {
 #endif
 }
 
-RZ_API int rz_sys_chdir(const char *s) {
+RZ_API bool rz_sys_chdir(const char *s) {
 	rz_return_val_if_fail(s, 0);
 	return chdir(s) == 0;
 }
@@ -555,26 +555,6 @@ RZ_API bool rz_sys_aslr(int val) {
 #elif __DragonFly__
 #endif
 	return ret;
-}
-
-RZ_API int rz_sys_thp_mode(void) {
-#if __linux__
-	const char *thp = "/sys/kernel/mm/transparent_hugepage/enabled";
-	int ret = 0;
-	char *val = rz_file_slurp(thp, NULL);
-	if (val) {
-		if (strstr(val, "[madvise]")) {
-			ret = 1;
-		} else if (strstr(val, "[always]")) {
-			ret = 2;
-		}
-		free(val);
-	}
-
-	return ret;
-#else
-	return 0;
-#endif
 }
 
 #if __UNIX__
@@ -1301,7 +1281,12 @@ RZ_API const char *rz_sys_prefix(const char *pfx) {
 		if (pid_to_path) {
 			char *t = rz_file_dirname(pid_to_path);
 			free(pid_to_path);
-			prefix = rz_file_dirname(t);
+			// When rz_sys_prefix is called from a unit test or from a
+			// not-yet-installed rizin binary this would return the wrong path.
+			// In those cases, just return RZ_PREFIX.
+			if (rz_str_endswith(t, RZ_SYS_DIR RZ_BINDIR)) {
+				prefix = rz_file_dirname(t);
+			}
 			free(t);
 		}
 		if (!prefix) {

@@ -20,7 +20,60 @@ static RzBinInfo *info(RzBinFile *bf);
 static void patch_relocs(RzBinFile *bf, struct Elf_(rz_bin_elf_obj_t) * bin);
 static RzList *imports(RzBinFile *bf);
 
-//TODO: implement rz_bin_symbol_dup() and rz_bin_symbol_free ?
+static RzBinSymbol *convert_symbol(ELFOBJ *bin, RzBinElfSymbol *elf_symbol) {
+	RzBinSymbol *result = RZ_NEW0(RzBinSymbol);
+	if (!result) {
+		return NULL;
+	}
+
+	result->paddr = elf_symbol->paddr;
+	result->vaddr = elf_symbol->vaddr;
+	result->name = rz_str_new(elf_symbol->name);
+	result->forwarder = "NONE";
+	result->bind = elf_symbol->bind;
+	result->type = elf_symbol->type;
+	result->size = elf_symbol->size;
+	result->ordinal = elf_symbol->ordinal;
+	result->bits = bin->bits;
+
+	if (Elf_(rz_bin_elf_is_arm_binary_supporting_thumb)(bin)) {
+		Elf_(rz_bin_elf_fix_arm_thumb_symbol)(result);
+	}
+
+	return result;
+}
+
+static RzBinSymbol *get_symbol(ELFOBJ *bin, ut32 ordinal) {
+	RzBinElfSymbol *symbol = Elf_(rz_bin_elf_get_symbol)(bin, ordinal);
+	if (!symbol) {
+		return NULL;
+	}
+
+	return convert_symbol(bin, symbol);
+}
+
+static RzBinImport *convert_import(RzBinElfSymbol *symbol) {
+	RzBinImport *result = RZ_NEW0(RzBinImport);
+	if (!result) {
+		return NULL;
+	}
+
+	result->name = rz_str_new(symbol->name);
+	result->bind = symbol->bind;
+	result->type = symbol->type;
+	result->ordinal = symbol->ordinal;
+
+	return result;
+}
+
+static RzBinImport *get_import(ELFOBJ *bin, ut32 ordinal) {
+	RzBinElfSymbol *symbol = Elf_(rz_bin_elf_get_import)(bin, ordinal);
+	if (!symbol) {
+		return NULL;
+	}
+
+	return convert_import(symbol);
+}
 
 static int get_file_type(RzBinFile *bf) {
 	struct Elf_(rz_bin_elf_obj_t) *obj = bf->o->bin_obj;
@@ -31,24 +84,25 @@ static int get_file_type(RzBinFile *bf) {
 }
 
 static char *regstate(RzBinFile *bf) {
-	struct Elf_(rz_bin_elf_obj_t) *obj = bf->o->bin_obj;
-	if (obj->ehdr.e_machine != EM_AARCH64 &&
-		obj->ehdr.e_machine != EM_ARM &&
-		obj->ehdr.e_machine != EM_386 &&
-		obj->ehdr.e_machine != EM_X86_64) {
+	ELFOBJ *obj = bf->o->bin_obj;
 
-		char *machine_name = Elf_(rz_bin_elf_get_machine_name)(obj);
-		eprintf("Cannot retrieve regstate on: %s (not yet supported)\n", machine_name);
-		free(machine_name);
+	RzVector *notes;
+	rz_bin_elf_foreach_notes_segment(obj, notes) {
+		RzBinElfNote *tmp;
+		rz_vector_foreach(notes, tmp) {
+			if (tmp->type != NT_PRSTATUS) {
+				continue;
+			}
 
-		return NULL;
+			RzBinElfNotePrStatus *note = &tmp->prstatus;
+			return rz_hex_bin2strdup(note->regstate, note->regstate_size);
+		}
 	}
 
-	size_t sz = 0;
-	const ut8 *regs = Elf_(rz_bin_elf_grab_regstate)(obj, &sz);
-	char *hexregs = (regs && sz) ? rz_hex_bin2strdup(regs, sz) : NULL;
-
-	return hexregs;
+	char *machine_name = Elf_(rz_bin_elf_get_machine_name)(obj);
+	eprintf("Cannot retrieve regstate on: %s (not yet supported)\n", machine_name);
+	free(machine_name);
+	return NULL;
 }
 
 static char *setphname(ut16 mach, Elf_(Word) ptyp) {
@@ -77,31 +131,14 @@ static Sdb *get_sdb(RzBinFile *bf) {
 	return NULL;
 }
 
-static bool load_buffer(RzBinFile *bf, void **bin_obj, RzBuffer *buf, ut64 loadaddr, Sdb *sdb) {
-	ELFOBJ *res = Elf_(rz_bin_elf_new_buf)(buf);
+static bool load_buffer(RzBinFile *bf, RzBinObject *obj, RzBuffer *buf, Sdb *sdb) {
+	ELFOBJ *res = Elf_(rz_bin_elf_new_buf)(buf, &obj->opts);
 	if (res) {
-		*bin_obj = res;
+		obj->bin_obj = res;
 		return true;
 	}
 
 	return false;
-}
-
-static void destroy(RzBinFile *bf) {
-	int i;
-	ELFOBJ *eobj = bf->o->bin_obj;
-	if (eobj && eobj->imports_by_ord) {
-		for (i = 0; i < eobj->imports_by_ord_size; i++) {
-			RzBinImport *imp = eobj->imports_by_ord[i];
-			if (imp) {
-				free(imp->name);
-				free(imp);
-				eobj->imports_by_ord[i] = NULL;
-			}
-		}
-		RZ_FREE(eobj->imports_by_ord);
-	}
-	Elf_(rz_bin_elf_free)((struct Elf_(rz_bin_elf_obj_t) *)bf->o->bin_obj);
 }
 
 static ut64 baddr(RzBinFile *bf) {
@@ -135,16 +172,14 @@ static RzBinAddr *binsym(RzBinFile *bf, RzBinSpecialSymbol sym) {
 	}
 	if (addr && addr != UT64_MAX && (ret = RZ_NEW0(RzBinAddr))) {
 		struct Elf_(rz_bin_elf_obj_t) *bin = bf->o->bin_obj;
-		bool is_arm = bin->ehdr.e_machine == EM_ARM;
 		ret->paddr = addr;
 		ret->vaddr = Elf_(rz_bin_elf_p2v_new)(obj, addr);
+		ret->bits = obj->bits;
 		if (ret->vaddr == UT64_MAX) {
 			ret->vaddr = addr;
 		}
-		if (is_arm && addr & 1) {
-			ret->bits = 16;
-			ret->vaddr--;
-			ret->paddr--;
+		if (Elf_(rz_bin_elf_is_arm_binary_supporting_thumb)(bin)) {
+			rz_bin_elf_fix_arm_thumb_object_dispatch(ret);
 		}
 	}
 	return ret;
@@ -172,26 +207,27 @@ static bool is_wordable_section(const char *name) {
 	return false;
 }
 
-static RzBinElfNoteFile *note_file_for_load_segment(struct Elf_(rz_bin_elf_obj_t) * obj, Elf_(Phdr) * phdr) {
-	if (!obj->note_segments) {
+static RzBinElfNoteFile *note_file_for_load_segment(ELFOBJ *obj, Elf_(Phdr) * phdr) {
+	if (!Elf_(rz_bin_elf_has_notes)(obj)) {
 		return false;
 	}
-	RzBinElfNoteSegment *seg;
-	RzListIter *it;
-	rz_list_foreach (obj->note_segments, it, seg) {
-		for (size_t i = 0; i < seg->notes_count; i++) {
-			RzBinElfNote *note = &seg->notes[i];
-			if (note->type != NT_FILE) {
+
+	RzVector *notes;
+	rz_bin_elf_foreach_notes_segment(obj, notes) {
+		RzBinElfNote *tmp;
+		rz_vector_foreach(notes, tmp) {
+			if (tmp->type != NT_FILE) {
 				continue;
 			}
-			for (size_t j = 0; j < note->file.files_count; j++) {
-				RzBinElfNoteFile *f = &note->file.files[j];
-				if (f->start_vaddr == phdr->p_vaddr) {
-					return f;
-				}
+
+			RzBinElfNoteFile *note = &tmp->file;
+
+			if (note->start_vaddr == phdr->p_vaddr) {
+				return note;
 			}
 		}
 	}
+
 	return NULL;
 }
 
@@ -266,7 +302,7 @@ static RzList *maps_unpatched(RzBinFile *bf) {
 				break;
 			}
 
-			map->name = strdup(section->name);
+			map->name = rz_str_new(section->name);
 			map->paddr = section->offset;
 			map->psize = section->type != SHT_NOBITS ? section->size : 0;
 			map->vsize = section->size;
@@ -310,12 +346,11 @@ static RzList *maps_unpatched(RzBinFile *bf) {
 	return ret;
 }
 
-static ut64 reloc_target_size(struct Elf_(rz_bin_elf_obj_t) * obj) {
-	ut64 r = Elf_(rz_bin_elf_get_bits)(obj);
-	if (!r) {
+static ut64 reloc_target_size(ELFOBJ *obj) {
+	if (!obj->bits) {
 		return 8;
 	}
-	return r / 8;
+	return obj->bits / 8;
 }
 
 /// base vaddr where to map the artificial reloc target vfile
@@ -344,11 +379,12 @@ static ut64 reloc_targets_map_base(RzBinFile *bf, struct Elf_(rz_bin_elf_obj_t) 
 }
 
 /// size of the artificial reloc target vfile
-static ut64 reloc_targets_vfile_size(RzBinFile *bf, struct Elf_(rz_bin_elf_obj_t) * obj) {
-	if (!bf->o || !bf->o->opts.patch_relocs) {
+static ut64 reloc_targets_vfile_size(RzBinFile *bf, ELFOBJ *obj) {
+	if (!bf->o || !bf->o->opts.patch_relocs || !Elf_(rz_bin_elf_has_relocs)(obj)) {
 		return 0;
 	}
-	return obj->g_reloc_num * reloc_target_size(obj);
+
+	return Elf_(rz_bin_elf_get_relocs_count)(obj) * reloc_target_size(obj);
 }
 
 static void patch_reloc(struct Elf_(rz_bin_elf_obj_t) * obj, RzBinElfReloc *rel, ut64 S, ut64 B, ut64 L) {
@@ -503,7 +539,7 @@ static void patch_reloc(struct Elf_(rz_bin_elf_obj_t) * obj, RzBinElfReloc *rel,
 	}
 }
 
-static RzBinReloc *reloc_convert(struct Elf_(rz_bin_elf_obj_t) * bin, RzBinElfReloc *rel, ut64 GOT) {
+static RzBinReloc *reloc_convert(ELFOBJ *bin, RzBinElfReloc *rel, ut64 GOT) {
 	rz_return_val_if_fail(bin && rel, NULL);
 
 	ut64 B = bin->baddr;
@@ -517,10 +553,9 @@ static RzBinReloc *reloc_convert(struct Elf_(rz_bin_elf_obj_t) * bin, RzBinElfRe
 	r->is_ifunc = false;
 	r->addend = rel->addend;
 	if (rel->sym) {
-		if (rel->sym < bin->imports_by_ord_size && bin->imports_by_ord[rel->sym]) {
-			r->import = bin->imports_by_ord[rel->sym];
-		} else if (rel->sym < bin->symbols_by_ord_size && bin->symbols_by_ord[rel->sym]) {
-			r->symbol = bin->symbols_by_ord[rel->sym];
+		r->import = get_import(bin, rel->sym);
+		if (!r->import) {
+			r->symbol = get_symbol(bin, rel->sym);
 		}
 	}
 	r->vaddr = rel->vaddr;
@@ -534,7 +569,7 @@ static RzBinReloc *reloc_convert(struct Elf_(rz_bin_elf_obj_t) * bin, RzBinElfRe
 #define ADD(T, A) \
 	r->type = RZ_BIN_RELOC_##T; \
 	r->addend += A; \
-	r->additive = rel->rel_mode == DT_RELA; \
+	r->additive = rel->mode == DT_RELA; \
 	return r
 
 	switch (bin->ehdr.e_machine) {
@@ -633,9 +668,9 @@ static RzBinReloc *reloc_convert(struct Elf_(rz_bin_elf_obj_t) * bin, RzBinElfRe
 	return NULL;
 }
 
-static void patch_relocs(RzBinFile *bf, struct Elf_(rz_bin_elf_obj_t) * bin) {
+static void patch_relocs(RzBinFile *bf, ELFOBJ *bin) {
 	rz_return_if_fail(bf && bin);
-	if (bin->relocs_patched) {
+	if (bin->relocs_patched || !Elf_(rz_bin_elf_has_relocs)(bin)) {
 		return;
 	}
 	bin->relocs_patched = true; // run this function just once (lazy relocs patching)
@@ -649,10 +684,6 @@ static void patch_relocs(RzBinFile *bf, struct Elf_(rz_bin_elf_obj_t) * bin) {
 		return;
 	}
 	ut64 n_vaddr = reloc_targets_map_base(bf, bin);
-	RzBinElfReloc *relcs = relcs = Elf_(rz_bin_elf_get_relocs)(bin);
-	if (!relcs) {
-		return;
-	}
 	HtUUOptions opt = { 0 };
 	HtUU *relocs_by_sym = ht_uu_new_opt(&opt);
 	if (!relocs_by_sym) {
@@ -663,24 +694,28 @@ static void patch_relocs(RzBinFile *bf, struct Elf_(rz_bin_elf_obj_t) * bin) {
 		ht_uu_free(relocs_by_sym);
 		return;
 	}
-	Elf_(rz_bin_elf_get_imports)(bin); // Pre-populate imports and syms. Calling this multiple times is fine since it only parses once lazily.
 	ut64 vaddr = n_vaddr;
-	size_t i;
-	for (i = 0; !relcs[i].last; i++) {
+	RzBinElfReloc *reloc;
+	rz_bin_elf_foreach_relocs(bin, reloc) {
 		ut64 sym_addr = 0;
 		ut64 plt_entry_addr = vaddr;
-		RzBinElfReloc *reloc = &relcs[i];
-
 		if (reloc->sym) {
-			if (reloc->sym < bin->imports_by_ord_size && bin->imports_by_ord[reloc->sym]) {
+			RzBinElfSymbol *import = Elf_(rz_bin_elf_get_import)(bin, reloc->sym);
+			if (import) {
 				bool found;
 				sym_addr = ht_uu_find(relocs_by_sym, reloc->sym, &found);
 				if (found) {
 					plt_entry_addr = sym_addr;
 				}
-			} else if (reloc->sym < bin->symbols_by_ord_size && bin->symbols_by_ord[reloc->sym]) {
-				sym_addr = bin->symbols_by_ord[reloc->sym]->vaddr;
-				plt_entry_addr = sym_addr;
+			} else {
+				RzBinElfSymbol *symbol = Elf_(rz_bin_elf_get_symbol)(bin, reloc->sym);
+				if (symbol) {
+					sym_addr = symbol->vaddr;
+					if (Elf_(rz_bin_elf_is_arm_binary_supporting_thumb)(bin) && Elf_(rz_bin_elf_is_thumb_addr)(sym_addr)) {
+						Elf_(rz_bin_elf_fix_arm_thumb_addr)(&sym_addr);
+					}
+					plt_entry_addr = sym_addr;
+				}
 			}
 		}
 		// TODO relocation types B, L
@@ -814,7 +849,10 @@ static RzList *sections(RzBinFile *bf) {
 		if (!(ptr = RZ_NEW0(RzBinSection))) {
 			break;
 		}
-		ptr->name = strdup((char *)section->name);
+		ptr->name = rz_str_new(section->name);
+		if (!ptr->name) {
+			ptr->name = rz_str_new("");
+		}
 		if (strstr(ptr->name, "data") && !strstr(ptr->name, "rel") && !strstr(ptr->name, "pydata")) {
 			ptr->is_data = true;
 		} else if (!strcmp(ptr->name, "C")) {
@@ -934,7 +972,7 @@ static RzBinAddr *newEntry(RzBinFile *bf, ut64 hpaddr, ut64 hvaddr, ut64 vaddr, 
 		ptr->bits = bits;
 		ptr->type = type;
 		//realign due to thumb
-		if (bits == 16 && ptr->vaddr & 1) {
+		if (bits == 16 && Elf_(rz_bin_elf_is_thumb_addr)(ptr->vaddr)) {
 			ptr->paddr--;
 			ptr->vaddr--;
 		}
@@ -991,10 +1029,7 @@ static RzList *entries(RzBinFile *bf) {
 	rz_return_val_if_fail(bf && bf->o && bf->o->bin_obj, NULL);
 
 	RzBinAddr *ptr = NULL;
-	struct rz_bin_elf_symbol_t *symbol;
-	int i;
-
-	struct Elf_(rz_bin_elf_obj_t) *obj = bf->o->bin_obj;
+	ELFOBJ *obj = bf->o->bin_obj;
 	RzList *ret = rz_list_newf((RzListFree)free);
 	if (!ret) {
 		return NULL;
@@ -1008,6 +1043,7 @@ static RzList *entries(RzBinFile *bf) {
 		ptr->vaddr = Elf_(rz_bin_elf_p2v_new)(obj, ptr->paddr);
 		ptr->hpaddr = 0x18; // e_entry offset in ELF header
 		ptr->hvaddr = UT64_MAX;
+		ptr->bits = obj->bits;
 
 		if (ptr->vaddr != (ut64)obj->ehdr.e_entry && Elf_(rz_bin_elf_is_executable)(obj)) {
 			eprintf("Cannot determine entrypoint, using 0x%08" PFMT64x ".\n", ptr->vaddr);
@@ -1023,36 +1059,29 @@ static RzList *entries(RzBinFile *bf) {
 				}
 			}
 		}
-		if (obj->ehdr.e_machine == EM_ARM) {
-			int bin_bits = Elf_(rz_bin_elf_get_bits)(obj);
-			if (bin_bits != 64) {
-				ptr->bits = 32;
-				if (ptr->vaddr & 1) {
-					ptr->vaddr--;
-					ptr->bits = 16;
-				}
-				if (ptr->paddr & 1) {
-					ptr->paddr--;
-					ptr->bits = 16;
-				}
-			}
+
+		if (Elf_(rz_bin_elf_is_arm_binary_supporting_thumb)(obj)) {
+			rz_bin_elf_fix_arm_thumb_object_dispatch(ptr);
 		}
+
 		rz_list_append(ret, ptr);
 	}
 
 	// add entrypoint for jni libraries
 	// NOTE: this is slow, we shouldnt find for java constructors here
-	if (!(symbol = Elf_(rz_bin_elf_get_symbols)(obj))) {
+	if (!Elf_(rz_bin_elf_has_symbols)(obj)) {
 		return ret;
 	}
-	for (i = 0; !symbol[i].last; i++) {
-		if (!strncmp(symbol[i].name, "Java", 4)) {
-			if (rz_str_endswith(symbol[i].name, "_init")) {
+
+	RzBinElfSymbol *symbol;
+	rz_bin_elf_foreach_symbols(obj, symbol) {
+		if (symbol->name && !strncmp(symbol->name, "Java", 4)) {
+			if (rz_str_endswith(symbol->name, "_init")) {
 				if (!(ptr = RZ_NEW0(RzBinAddr))) {
 					return ret;
 				}
-				ptr->paddr = symbol[i].offset;
-				ptr->vaddr = Elf_(rz_bin_elf_p2v_new)(obj, ptr->paddr);
+				ptr->paddr = symbol->paddr;
+				ptr->vaddr = symbol->vaddr;
 				ptr->hpaddr = UT64_MAX;
 				ptr->type = RZ_BIN_ENTRY_TYPE_INIT;
 				rz_list_append(ret, ptr);
@@ -1060,107 +1089,78 @@ static RzList *entries(RzBinFile *bf) {
 			}
 		}
 	}
-	int bin_bits = Elf_(rz_bin_elf_get_bits)(bf->o->bin_obj);
+	int bin_bits = obj->bits;
 	process_constructors(bf, ret, bin_bits < 32 ? 32 : bin_bits);
 	return ret;
 }
 
-static void insert_symbol(struct Elf_(rz_bin_elf_obj_t) * bin, RzBinSymbol *ptr, bool is_sht_null, RzList *ret) {
-	// add it to the list of symbols only if it doesn't point to SHT_NULL
-	if (is_sht_null) {
-		rz_bin_symbol_free(ptr);
-	} else {
-		rz_list_append(ret, ptr);
-	}
-}
-
 static RzList *symbols(RzBinFile *bf) {
-	struct rz_bin_elf_symbol_t *symbol = NULL;
-	RzBinSymbol *ptr = NULL;
-	int i;
-
 	rz_return_val_if_fail(bf && bf->o && bf->o->bin_obj, NULL);
 
-	struct Elf_(rz_bin_elf_obj_t) *bin = bf->o->bin_obj;
+	ELFOBJ *bin = bf->o->bin_obj;
 	RzList *ret = rz_list_newf((RzListFree)rz_bin_symbol_free);
 	if (!ret) {
 		return NULL;
 	}
 
-	// traverse symbols
-	if (!(symbol = Elf_(rz_bin_elf_get_symbols)(bin))) {
-		return ret;
-	}
-	for (i = 0; !symbol[i].last; i++) {
-		ptr = Elf_(rz_bin_elf_convert_symbol)(bin, &symbol[i], "%s");
-		if (!ptr) {
-			break;
+	RzBinElfSymbol *symbol;
+	rz_bin_elf_foreach_symbols(bin, symbol) {
+		RzBinSymbol *tmp = convert_symbol(bin, symbol);
+		if (!tmp) {
+			rz_list_free(ret);
+			return NULL;
 		}
-		insert_symbol(bin, ptr, symbol[i].is_sht_null, ret);
+
+		rz_list_append(ret, tmp);
 	}
 
-	// traverse imports
-	if (!(symbol = Elf_(rz_bin_elf_get_imports)(bin))) {
-		return ret;
+	RzBinElfSymbol *import;
+	rz_bin_elf_foreach_imports(bin, import) {
+		RzBinSymbol *tmp = convert_symbol(bin, import);
+		if (!tmp) {
+			rz_list_free(ret);
+			return NULL;
+		}
+
+		tmp->is_imported = true;
+
+		rz_list_append(ret, tmp);
 	}
-	for (i = 0; !symbol[i].last; i++) {
-		if (!symbol[i].size) {
-			continue;
-		}
-		ptr = Elf_(rz_bin_elf_convert_symbol)(bin, &symbol[i], "%s");
-		if (!ptr) {
-			break;
-		}
-		ptr->is_imported = true;
-		// special case where there is not entry in the plt for the import
-		if (ptr->vaddr == UT32_MAX) {
-			ptr->paddr = 0;
-			ptr->vaddr = 0;
-		}
-		insert_symbol(bin, ptr, symbol[i].is_sht_null, ret);
-	}
+
 	return ret;
 }
 
 static RzList *imports(RzBinFile *bf) {
-	RzBinElfSymbol *import = NULL;
 	rz_return_val_if_fail(bf && bf->o, NULL);
-	struct Elf_(rz_bin_elf_obj_t) *elf = bf->o->bin_obj;
-	RzList *ret = rz_list_newf((RzListFree)rz_bin_import_free);
-	if (!ret) {
+
+	ELFOBJ *bin = bf->o->bin_obj;
+
+	if (!Elf_(rz_bin_elf_has_imports)(bin)) {
 		return NULL;
 	}
-	if (!(import = Elf_(rz_bin_elf_get_imports)(elf))) {
-		rz_list_free(ret);
+
+	RzList *result = rz_list_newf((RzListFree)rz_bin_import_free);
+	if (!result) {
 		return NULL;
 	}
-	for (size_t i = 0; !import[i].last; i++) {
-		RzBinImport *imp = Elf_(rz_bin_elf_convert_import)(elf, &import[i]);
-		if (!imp) {
-			continue;
+
+	RzBinElfSymbol *import;
+	rz_bin_elf_foreach_imports(bin, import) {
+		RzBinImport *tmp = convert_import(import);
+		if (!tmp) {
+			rz_list_free(result);
+			return NULL;
 		}
-		rz_list_append(ret, imp);
+
+		rz_list_append(result, tmp);
 	}
-	return ret;
+
+	return result;
 }
 
 static RzList *libs(RzBinFile *bf) {
 	rz_return_val_if_fail(bf && bf->o && bf->o->bin_obj, NULL);
-
-	RzList *ret = rz_list_newf(free);
-	if (!ret) {
-		return NULL;
-	}
-	struct rz_bin_elf_lib_t *libs = Elf_(rz_bin_elf_get_libs)(bf->o->bin_obj);
-	if (libs) {
-		int i;
-		for (i = 0; !libs[i].last; i++) {
-			char *ptr = strdup(libs[i].name);
-			rz_list_append(ret, ptr);
-		}
-		free(libs);
-	}
-	return ret;
+	return Elf_(rz_bin_elf_get_libs)(bf->o->bin_obj);
 }
 
 static ut64 get_got_addr(ELFOBJ *bin) {
@@ -1185,12 +1185,18 @@ static RzList *relocs(RzBinFile *bf) {
 	rz_return_val_if_fail(bf && bf->o && bf->o->bin_obj, NULL);
 	RzList *ret = NULL;
 	RzBinReloc *ptr = NULL;
-	RzBinElfReloc *relocs = NULL;
-	struct Elf_(rz_bin_elf_obj_t) *bin = bf->o->bin_obj;
-	if (bin) {
-		patch_relocs(bf, bin);
+
+	if (!bf->o) {
+		return NULL;
 	}
-	Elf_(rz_bin_elf_get_imports)(bin); // Pre-populate imports and syms. Calling this multiple times is fine since it only parses once lazily.
+
+	ELFOBJ *bin = bf->o->bin_obj;
+	if (!bin || !Elf_(rz_bin_elf_has_relocs)(bin)) {
+		return NULL;
+	}
+
+	patch_relocs(bf, bin);
+
 	if (!(ret = rz_list_newf(free))) {
 		return NULL;
 	}
@@ -1200,18 +1206,16 @@ static RzList *relocs(RzBinFile *bf) {
 	if (!got_addr) {
 		got_addr = reloc_targets_map_base(bf, bin);
 	}
-	if (bf->o) {
-		if (!(relocs = Elf_(rz_bin_elf_get_relocs)(bin))) {
-			return ret;
+
+	RzBinElfReloc *reloc;
+	rz_bin_elf_foreach_relocs(bin, reloc) {
+		if (!(ptr = reloc_convert(bin, reloc, got_addr))) {
+			continue;
 		}
-		size_t i;
-		for (i = 0; !relocs[i].last; i++) {
-			if (!(ptr = reloc_convert(bin, &relocs[i], got_addr))) {
-				continue;
-			}
-			rz_list_append(ret, ptr);
-		}
+
+		rz_list_append(ret, ptr);
 	}
+
 	return ret;
 }
 
@@ -1294,7 +1298,7 @@ static RzBinInfo *info(RzBinFile *bf) {
 	ret->file = bf->file
 		? strdup(bf->file)
 		: NULL;
-	void *obj = bf->o->bin_obj;
+	ELFOBJ *obj = bf->o->bin_obj;
 	if ((str = Elf_(rz_bin_elf_get_rpath)(obj))) {
 		ret->rpath = strdup(str);
 		free(str);
@@ -1347,7 +1351,7 @@ static RzBinInfo *info(RzBinFile *bf) {
 	}
 
 	ret->rclass = strdup("elf");
-	ret->bits = Elf_(rz_bin_elf_get_bits)(obj);
+	ret->bits = obj->bits;
 	if (!strcmp(ret->arch, "avr")) {
 		ret->bits = 16;
 	}
@@ -1376,50 +1380,159 @@ static RzList *fields(RzBinFile *bf) {
 		return NULL;
 	}
 
-#define ROW(nam, siz, val, fmt) \
-	rz_list_append(ret, rz_bin_field_new(addr, addr, siz, nam, sdb_fmt("0x%08" PFMT64x, (ut64)val), fmt, false));
+#define ROW(name, siz, val, fmt) \
+	rz_list_append(ret, rz_bin_field_new(addr, addr, siz, name, sdb_fmt("0x%08" PFMT64x, (ut64)val), fmt, false));
+
 	if (rz_buf_size(bf->buf) < sizeof(Elf_(Ehdr))) {
 		return ret;
 	}
-	ut64 addr = 0;
-	ROW("ELF", 4, rz_buf_read_le32_at(bf->buf, addr), "x");
-	addr += 0x10;
-	ROW("Type", 2, rz_buf_read_le16_at(bf->buf, addr), "x");
-	addr += 0x2;
-	ROW("Machine", 2, rz_buf_read_le16_at(bf->buf, addr), "x");
-	addr += 0x2;
-	ROW("Version", 4, rz_buf_read_le32_at(bf->buf, addr), "x");
-	addr += 0x4;
 
-	if (rz_buf_read8_at(bf->buf, 0x04) == 1) {
-		ROW("Entry point", 4, rz_buf_read_le32_at(bf->buf, addr), "x");
+	ut32 magic;
+	ut64 addr = 0;
+	if (!rz_buf_read_le32_at(bf->buf, addr, &magic)) {
+		rz_list_free(ret);
+		return NULL;
+	}
+	ROW("ELF", 4, magic, "x");
+
+	ut16 type;
+	addr += 0x10;
+	if (!rz_buf_read_le16_at(bf->buf, addr, &type)) {
+		rz_list_free(ret);
+		return NULL;
+	}
+	ROW("Type", 2, type, "x");
+
+	ut16 machine;
+	addr += 0x2;
+	if (!rz_buf_read_le16_at(bf->buf, addr, &machine)) {
+		rz_list_free(ret);
+		return NULL;
+	}
+	ROW("Machine", 2, machine, "x");
+
+	ut32 version;
+	addr += 0x2;
+	if (!rz_buf_read_le32_at(bf->buf, addr, &version)) {
+		rz_list_free(ret);
+		return NULL;
+	}
+	ROW("Version", 4, version, "x");
+
+	ut8 tmp;
+	if (!rz_buf_read8_at(bf->buf, 0x04, &tmp)) {
+		rz_list_free(ret);
+		return NULL;
+	}
+
+	if (tmp == 1) {
+		ut32 entry;
 		addr += 0x4;
-		ROW("PhOff", 4, rz_buf_read_le32_at(bf->buf, addr), "x");
+		if (!rz_buf_read_le32_at(bf->buf, addr, &entry)) {
+			rz_list_free(ret);
+			return NULL;
+		}
+		ROW("Entry point", 4, entry, "x");
+
+		ut32 phoff;
 		addr += 0x4;
-		ROW("ShOff", 4, rz_buf_read_le32_at(bf->buf, addr), "x");
+		if (!rz_buf_read_le32_at(bf->buf, addr, &phoff)) {
+			rz_list_free(ret);
+			return NULL;
+		}
+		ROW("PhOff", 4, phoff, "x");
+
+		ut32 shoff;
+		addr += 0x4;
+		if (!rz_buf_read_le32_at(bf->buf, addr, &shoff)) {
+			rz_list_free(ret);
+			return NULL;
+		}
+		ROW("ShOff", 4, shoff, "x");
+
 		addr += 0x4;
 	} else {
-		ROW("Entry point", 8, rz_buf_read_le64_at(bf->buf, addr), "x");
+		ut64 entry;
+		addr += 0x4;
+		if (!rz_buf_read_le64_at(bf->buf, addr, &entry)) {
+			rz_list_free(ret);
+			return NULL;
+		}
+		ROW("Entry point", 8, entry, "x");
+
+		ut64 phoff;
 		addr += 0x8;
-		ROW("PhOff", 8, rz_buf_read_le64_at(bf->buf, addr), "x");
+		if (!rz_buf_read_le64_at(bf->buf, addr, &phoff)) {
+			rz_list_free(ret);
+			return NULL;
+		}
+		ROW("PhOff", 8, phoff, "x");
+
+		ut64 shoff;
 		addr += 0x8;
-		ROW("ShOff", 8, rz_buf_read_le64_at(bf->buf, addr), "x");
+		if (!rz_buf_read_le64_at(bf->buf, addr, &shoff)) {
+			rz_list_free(ret);
+			return NULL;
+		}
+		ROW("ShOff", 8, shoff, "x");
+
 		addr += 0x8;
 	}
 
-	ROW("Flags", 4, rz_buf_read_le32_at(bf->buf, addr), "x");
+	ut32 flags;
+	if (!rz_buf_read_le32_at(bf->buf, addr, &flags)) {
+		rz_list_free(ret);
+		return NULL;
+	}
+	ROW("Flags", 4, flags, "x");
+
+	ut16 ehsize;
 	addr += 0x4;
-	ROW("EhSize", 2, rz_buf_read_le16_at(bf->buf, addr), "x");
+	if (!rz_buf_read_le16_at(bf->buf, addr, &ehsize)) {
+		rz_list_free(ret);
+		return NULL;
+	}
+	ROW("EhSize", 2, ehsize, "x");
+
+	ut16 phentsize;
 	addr += 0x2;
-	ROW("PhentSize", 2, rz_buf_read_le16_at(bf->buf, addr), "x");
+	if (!rz_buf_read_le16_at(bf->buf, addr, &phentsize)) {
+		rz_list_free(ret);
+		return NULL;
+	}
+	ROW("PhentSize", 2, phentsize, "x");
+
+	ut16 phnum;
 	addr += 0x2;
-	ROW("PhNum", 2, rz_buf_read_le16_at(bf->buf, addr), "x");
+	if (!rz_buf_read_le16_at(bf->buf, addr, &phnum)) {
+		rz_list_free(ret);
+		return NULL;
+	}
+	ROW("PhNum", 2, phnum, "x");
+
+	ut16 shentsize;
 	addr += 0x2;
-	ROW("ShentSize", 2, rz_buf_read_le16_at(bf->buf, addr), "x");
+	if (!rz_buf_read_le16_at(bf->buf, addr, &shentsize)) {
+		rz_list_free(ret);
+		return NULL;
+	}
+	ROW("ShentSize", 2, shentsize, "x");
+
+	ut16 shnum;
 	addr += 0x2;
-	ROW("ShNum", 2, rz_buf_read_le16_at(bf->buf, addr), "x");
+	if (!rz_buf_read_le16_at(bf->buf, addr, &shnum)) {
+		rz_list_free(ret);
+		return NULL;
+	}
+	ROW("ShNum", 2, shnum, "x");
+
+	ut16 shrstrndx;
 	addr += 0x2;
-	ROW("ShrStrndx", 2, rz_buf_read_le16_at(bf->buf, addr), "x");
+	if (!rz_buf_read_le16_at(bf->buf, addr, &shrstrndx)) {
+		rz_list_free(ret);
+		return NULL;
+	}
+	ROW("ShrStrndx", 2, shrstrndx, "x");
 
 	return ret;
 }

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
 #include <rz_core.h>
+#include <rz_cons.h>
 
 #include "core_private.h"
 
@@ -426,8 +427,10 @@ static bool cb_asmcpu(void *user, void *data) {
 		update_asmcpu_options(core, node);
 		/* print verbose help instead of plain option listing */
 		RzCmdStateOutput state = { 0 };
-		state.mode = RZ_OUTPUT_MODE_STANDARD;
+		rz_cmd_state_output_init(&state, RZ_OUTPUT_MODE_STANDARD);
 		rz_core_asm_plugins_print(core, rz_config_get(core->config, "asm.arch"), &state);
+		rz_cmd_state_output_print(&state);
+		rz_cmd_state_output_fini(&state);
 		return 0;
 	}
 	rz_asm_set_cpu(core->rasm, node->value);
@@ -435,6 +438,8 @@ static bool cb_asmcpu(void *user, void *data) {
 
 	const char *dir_prefix = rz_config_get(core->config, "dir.prefix");
 	rz_arch_profiles_init(core->analysis->arch_target, node->value, rz_config_get(core->config, "asm.arch"), dir_prefix);
+	const char *platform = rz_config_get(core->config, "asm.platform");
+	rz_arch_platform_init(core->analysis->platform_target, rz_config_get(core->config, "asm.arch"), node->value, platform, dir_prefix);
 
 	return true;
 }
@@ -490,8 +495,10 @@ static bool cb_asmarch(void *user, void *data) {
 		if (strlen(node->value) > 1 && node->value[1] == '?') {
 			/* print more verbose help instead of plain option values */
 			RzCmdStateOutput state = { 0 };
-			state.mode = RZ_OUTPUT_MODE_STANDARD;
+			rz_cmd_state_output_init(&state, RZ_OUTPUT_MODE_STANDARD);
 			rz_core_asm_plugins_print(core, NULL, &state);
+			rz_cmd_state_output_print(&state);
+			rz_cmd_state_output_fini(&state);
 			return false;
 		} else {
 			print_node_options(node);
@@ -563,11 +570,13 @@ static bool cb_asmarch(void *user, void *data) {
 	if (core->analysis) {
 		const char *asmcpu = rz_config_get(core->config, "asm.cpu");
 		const char *dir_prefix = rz_config_get(core->config, "dir.prefix");
+		const char *platform = rz_config_get(core->config, "asm.platform");
 		if (!rz_syscall_setup(core->analysis->syscall, node->value, core->analysis->bits, asmcpu, asmos)) {
 			//eprintf ("asm.arch: Cannot setup syscall '%s/%s' from '%s'\n",
 			//	node->value, asmos, RZ_LIBDIR"/rizin/"RZ_VERSION"/syscall");
 		}
 		update_syscall_ns(core);
+		rz_arch_platform_init(core->analysis->platform_target, node->value, asmcpu, platform, dir_prefix);
 		rz_arch_profiles_init(core->analysis->arch_target, asmcpu, node->value, dir_prefix);
 	}
 	//if (!strcmp (node->value, "bf"))
@@ -612,8 +621,10 @@ static bool cb_asmarch(void *user, void *data) {
 	rz_core_analysis_cc_init(core);
 
 	const char *dir_prefix = rz_config_get(core->config, "dir.prefix");
+	const char *platform = rz_config_get(core->config, "asm.platform");
 	rz_sysreg_set_arch(core->analysis->syscall, node->value, dir_prefix);
 	if (asmcpu) {
+		rz_arch_platform_init(core->analysis->platform_target, node->value, asmcpu->value, platform, dir_prefix);
 		rz_arch_profiles_init(core->analysis->arch_target, asmcpu->value, node->value, dir_prefix);
 	}
 
@@ -727,6 +738,7 @@ static void update_asmfeatures_options(RzCore *core, RzConfigNode *node) {
 	if (core && core->rasm && core->rasm->cur) {
 		if (core->rasm->cur->features) {
 			char *features = strdup(core->rasm->cur->features);
+			rz_list_purge(node->options);
 			argc = rz_str_split(features, ',');
 			for (i = 0; i < argc; i++) {
 				node->options->free = free;
@@ -759,6 +771,48 @@ static bool cb_asmfeatures(void *user, void *data) {
 	if (node->value[0]) {
 		core->rasm->features = strdup(node->value);
 	}
+	return 1;
+}
+
+static void update_asmplatforms_options(RzCore *core, RzConfigNode *node) {
+	int i, argc;
+
+	if (core && core->rasm && core->rasm->cur) {
+		if (core->rasm->cur->platforms) {
+			char *platforms = strdup(core->rasm->cur->platforms);
+			rz_list_purge(node->options);
+			argc = rz_str_split(platforms, ',');
+			for (i = 0; i < argc; i++) {
+				node->options->free = free;
+				const char *feature = rz_str_word_get0(platforms, i);
+				if (feature) {
+					rz_list_append(node->options, strdup(feature));
+				}
+			}
+			free(platforms);
+		}
+	}
+}
+
+static bool cb_asmplatform(void *user, void *data) {
+	RzCore *core = (RzCore *)user;
+	RzConfigNode *node = (RzConfigNode *)data;
+	if (!core) {
+		return false;
+	}
+	if (*node->value == '?') {
+		update_asmplatforms_options(core, node);
+		print_node_options(node);
+		return 0;
+	}
+	RZ_FREE(core->rasm->platforms);
+	if (node->value[0]) {
+		core->rasm->platforms = strdup(node->value);
+	}
+	const char *dir_prefix = rz_config_get(core->config, "dir.prefix");
+	const char *asmcpu = rz_config_get(core->config, "asm.cpu");
+	const char *asmarch = rz_config_get(core->config, "asm.arch");
+	rz_arch_platform_init(core->analysis->platform_target, asmarch, asmcpu, node->value, dir_prefix);
 	return 1;
 }
 
@@ -1101,9 +1155,6 @@ static bool cb_cfgdebug(void *user, void *data) {
 		const char *dbgbackend = rz_config_get(core->config, "dbg.backend");
 		core->bin->is_debugger = true;
 		rz_debug_use(core->dbg, dbgbackend);
-		if (!strcmp(rz_config_get(core->config, "cmd.prompt"), "")) {
-			rz_config_set(core->config, "cmd.prompt", ".dr*");
-		}
 		if (!strcmp(dbgbackend, "bf")) {
 			rz_config_set(core->config, "asm.arch", "bf");
 		}
@@ -1403,27 +1454,15 @@ static bool cb_dbg_args(void *user, void *data) {
 	return true;
 }
 
-static bool cb_dbgstatus(void *user, void *data) {
-	RzCore *r = (RzCore *)user;
-	RzConfigNode *node = (RzConfigNode *)data;
-	if (rz_config_get_i(r->config, "cfg.debug")) {
-		if (node->i_value) {
-			rz_config_set(r->config, "cmd.prompt",
-				".dr*; drd; sr PC;pi 1;s-");
-		} else {
-			rz_config_set(r->config, "cmd.prompt", ".dr*");
-		}
-	}
-	return true;
-}
-
 static bool cb_dbgbackend(void *user, void *data) {
 	RzCore *core = (RzCore *)user;
 	RzConfigNode *node = (RzConfigNode *)data;
 	RzCmdStateOutput state = { 0 };
-	state.mode = RZ_OUTPUT_MODE_QUIET;
+	rz_cmd_state_output_init(&state, RZ_OUTPUT_MODE_QUIET);
 	if (!strcmp(node->value, "?")) {
 		rz_core_debug_plugins_print(core, &state);
+		rz_cmd_state_output_print(&state);
+		rz_cmd_state_output_fini(&state);
 		return false;
 	}
 	if (!strcmp(node->value, "bf")) {
@@ -1680,6 +1719,122 @@ RZ_API bool rz_core_esil_cmd(RzAnalysisEsil *esil, const char *cmd, ut64 a1, ut6
 		return core->num->value;
 	}
 	return false;
+}
+
+static void config_print_node(RzConfig *cfg, RzConfigNode *node, RzCmdStateOutput *state) {
+	rz_return_if_fail(cfg && node && state);
+	char *option;
+	bool isFirst;
+	RzOutputMode mode = state->mode;
+	PJ *pj = state->d.pj;
+	RzListIter *iter;
+	char *es = NULL;
+
+	switch (mode) {
+	case RZ_OUTPUT_MODE_JSON:
+		if (rz_str_isnumber(node->value)) {
+			pj_kn(pj, node->name, rz_num_math(NULL, node->value));
+			return;
+		} else if (rz_str_is_bool(node->value)) {
+			pj_kb(pj, node->name, (node->value));
+			return;
+		} else {
+			pj_ks(pj, node->name, node->value);
+		}
+		break;
+	case RZ_OUTPUT_MODE_LONG_JSON:
+		pj_o(pj);
+		pj_ks(pj, "name", node->name);
+		if (rz_str_isnumber(node->value)) {
+			pj_kn(pj, "value", rz_num_math(NULL, node->value));
+		} else if (rz_str_is_bool(node->value)) {
+			pj_kb(pj, "value", (node->value));
+		} else {
+			pj_ks(pj, "value", node->value);
+		}
+		pj_ks(pj, "type", rz_config_node_type(node));
+		es = rz_str_escape(node->desc);
+		if (es) {
+			pj_ks(pj, "desc", es);
+			free(es);
+		}
+		pj_kb(pj, "ro", rz_config_node_is_ro(node));
+		if (!rz_list_empty(node->options)) {
+			pj_ka(pj, "options");
+			rz_list_foreach (node->options, iter, option) {
+				pj_s(pj, option);
+			}
+			pj_end(pj);
+		}
+		pj_end(pj);
+		break;
+	case RZ_OUTPUT_MODE_LONG:
+		rz_cons_printf("%s = %s %s; %s",
+			node->name, node->value,
+			rz_config_node_is_ro(node) ? "(ro)" : "",
+			node->desc);
+		if (!rz_list_empty(node->options)) {
+			isFirst = true;
+			rz_cons_printf(" [");
+			rz_list_foreach (node->options, iter, option) {
+				if (isFirst) {
+					isFirst = false;
+				} else {
+					rz_cons_printf(", ");
+				}
+				rz_cons_printf("%s", option);
+			}
+			rz_cons_printf("]");
+		}
+		rz_cons_println("");
+		break;
+	case RZ_OUTPUT_MODE_QUIET:
+		rz_cons_printf("%s=%s\n", node->name, node->value);
+		break;
+	case RZ_OUTPUT_MODE_RIZIN:
+		es = rz_cmd_escape_arg(node->value, RZ_CMD_ESCAPE_ONE_ARG);
+		rz_cons_printf("e %s=%s\n", node->name, es);
+		free(es);
+		break;
+	case RZ_OUTPUT_MODE_STANDARD:
+		rz_cons_printf("%20s: %s\n", node->name,
+			node->desc ? node->desc : "");
+		break;
+	default:
+		rz_warn_if_reached();
+		break;
+	}
+}
+
+/**
+ * \brief Prints the configuation variables with their description and its values
+ *
+ * \param cfg reference to RzConfig
+ * \param str reference to the key that can be passed to filter the output
+ * \param state reference to RzCmdStateOutput
+ */
+RZ_API void rz_core_config_print_all(RzConfig *cfg, const char *str, RzCmdStateOutput *state) {
+	rz_return_if_fail(cfg);
+	RzConfigNode *node;
+	RzListIter *iter;
+	PJ *pj = state->d.pj;
+	RzOutputMode mode = state->mode;
+
+	if (mode == RZ_OUTPUT_MODE_LONG_JSON) {
+		pj_a(pj);
+	} else if (mode == RZ_OUTPUT_MODE_JSON) {
+		pj_o(pj);
+	}
+
+	rz_list_foreach (cfg->nodes, iter, node) {
+		if (rz_str_startswith(node->name, str)) {
+			config_print_node(cfg, node, state);
+		}
+	}
+
+	if (mode == RZ_OUTPUT_MODE_LONG_JSON || mode == RZ_OUTPUT_MODE_JSON) {
+		pj_end(pj);
+	}
 }
 
 static bool cb_cmd_esil_ioer(void *user, void *data) {
@@ -2022,24 +2177,24 @@ static bool cb_scrhighlight(void *user, void *data) {
 static bool scr_vtmode(void *user, void *data) {
 	RzConfigNode *node = (RzConfigNode *)data;
 	if (rz_str_is_true(node->value)) {
-		node->i_value = 1;
+		node->i_value = RZ_VIRT_TERM_MODE_OUTPUT_ONLY;
 	}
-	node->i_value = node->i_value > 2 ? 2 : node->i_value;
+	node->i_value = node->i_value > RZ_VIRT_TERM_MODE_COMPLETE ? RZ_VIRT_TERM_MODE_COMPLETE : node->i_value;
 	rz_line_singleton()->vtmode = rz_cons_singleton()->vtmode = node->i_value;
 
 	DWORD mode;
 	HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
 	GetConsoleMode(input, &mode);
-	if (node->i_value == 2) {
+	if (node->i_value == RZ_VIRT_TERM_MODE_COMPLETE) {
 		SetConsoleMode(input, mode & ENABLE_VIRTUAL_TERMINAL_INPUT);
-		rz_cons_singleton()->term_raw = ENABLE_VIRTUAL_TERMINAL_INPUT;
+		rz_cons_singleton()->term_raw |= ENABLE_VIRTUAL_TERMINAL_INPUT;
 	} else {
 		SetConsoleMode(input, mode & ~ENABLE_VIRTUAL_TERMINAL_INPUT);
-		rz_cons_singleton()->term_raw = 0;
+		rz_cons_singleton()->term_raw &= ~ENABLE_VIRTUAL_TERMINAL_INPUT;
 	}
 	HANDLE streams[] = { GetStdHandle(STD_OUTPUT_HANDLE), GetStdHandle(STD_ERROR_HANDLE) };
 	int i;
-	if (node->i_value > 0) {
+	if (node->i_value > RZ_VIRT_TERM_MODE_DISABLE) {
 		for (i = 0; i < RZ_ARRAY_SIZE(streams); i++) {
 			GetConsoleMode(streams[i], &mode);
 			SetConsoleMode(streams[i],
@@ -2544,6 +2699,13 @@ static bool cb_analysis_jmptbl(void *user, void *data) {
 	return true;
 }
 
+static bool cb_analysis_jmptblmax(void *user, void *data) {
+	RzCore *core = (RzCore *)user;
+	RzConfigNode *node = (RzConfigNode *)data;
+	core->analysis->opt.jmptbl_maxcount = node->i_value;
+	return true;
+}
+
 static bool cb_analysis_cjmpref(void *user, void *data) {
 	RzCore *core = (RzCore *)user;
 	RzConfigNode *node = (RzConfigNode *)data;
@@ -2727,7 +2889,6 @@ RZ_API int rz_core_config_init(RzCore *core) {
 	if (!cfg) {
 		return 0;
 	}
-	cfg->cb_printf = rz_cons_printf;
 	cfg->num = core->num;
 	/* dir.prefix is used in other modules, set it first */
 	{
@@ -2760,6 +2921,11 @@ RZ_API int rz_core_config_init(RzCore *core) {
 	}
 	SETI("pdb.extract", 1, "Avoid extract of the pdb file, just download");
 	SETI("pdb.autoload", false, "Automatically load the required pdb files for loaded DLLs");
+
+	/* elf */
+	SETBPREF("elf.checks.sections", "true", "Check elf sections during loading");
+	SETBPREF("elf.checks.segments", "true", "Check elf segments during loading");
+	SETBPREF("elf.load.sections", "true", "Automatically load elf sections");
 
 	/* analysis */
 	SETBPREF("analysis.detectwrites", "false", "Automatically reanalyze function after a write");
@@ -2825,6 +2991,7 @@ RZ_API int rz_core_config_init(RzCore *core) {
 	SETICB("asm.lines.maxref", 0, &cb_analysis_maxrefs, "Maximum number of reflines to be analyzed and displayed in asm.lines with pd");
 
 	SETCB("analysis.jmp.tbl", "true", &cb_analysis_jmptbl, "Analyze jump tables in switch statements");
+	SETICB("analysis.jmp.tblmax", 512, &cb_analysis_jmptblmax, "Maximum amount of entries to analyze in jump tables");
 
 	SETCB("analysis.jmp.cref", "false", &cb_analysis_cjmpref, "Create references for conditional jumps");
 	SETCB("analysis.jmp.ref", "true", &cb_analysis_jmpref, "Create references for unconditional jumps");
@@ -2876,9 +3043,9 @@ RZ_API int rz_core_config_init(RzCore *core) {
 	SETI("esil.timeout", 0, "A timeout (in seconds) for when we should give up emulating");
 	/* asm */
 	//asm.os needs to be first, since other asm.* depend on it
-	n = NODECB("asm.os", RZ_SYS_OS, &cb_asmos);
+	n = NODECB("asm.os", "none", &cb_asmos);
 	SETDESC(n, "Select operating system (kernel)");
-	SETOPTIONS(n, "ios", "dos", "darwin", "linux", "freebsd", "openbsd", "netbsd", "windows", "s110", NULL);
+	SETOPTIONS(n, "ios", "dos", "darwin", "linux", "freebsd", "openbsd", "netbsd", "windows", "s110", "none", NULL);
 	SETI("asm.xrefs.fold", 5, "Maximum number of xrefs to be displayed as list (use columns above)");
 	SETBPREF("asm.xrefs.code", "true", "Show the code xrefs (generated by jumps instead of calls)");
 	SETI("asm.xrefs.max", 20, "Maximum number of xrefs to be displayed without folding");
@@ -3017,6 +3184,9 @@ RZ_API int rz_core_config_init(RzCore *core) {
 	n = NODECB("asm.features", "", &cb_asmfeatures);
 	SETDESC(n, "Specify supported features by the target CPU");
 	update_asmfeatures_options(core, n);
+	n = NODECB("asm.platform", "", &cb_asmplatform);
+	SETDESC(n, "Specify supported platforms by the target architecture");
+	update_asmplatforms_options(core, n);
 	n = NODECB("asm.parser", "x86.pseudo", &cb_asmparser);
 	SETDESC(n, "Set the asm parser to use");
 	update_asmparser_options(core, n);
@@ -3081,6 +3251,7 @@ RZ_API int rz_core_config_init(RzCore *core) {
 
 	/* prj */
 	SETPREF("prj.file", "", "Path of the currently opened project");
+	SETBPREF("prj.compress", "false", "Compress the project file while saving");
 
 	/* cfg */
 	SETBPREF("cfg.plugins", "true", "Load plugins at startup");
@@ -3213,7 +3384,7 @@ RZ_API int rz_core_config_init(RzCore *core) {
 	SETCB("dbg.trace_continue", "true", &cb_dbg_trace_continue, "Trace every instruction between the initial PC position and the PC position at the end of continue's execution");
 	SETCB("dbg.create_new_console", "true", &cb_dbg_create_new_console, "Create a new console window for the debugee on debug start");
 	/* debug */
-	SETCB("dbg.status", "false", &cb_dbgstatus, "Set cmd.prompt to '.dr*' or '.dr*;drd;sr PC;pi 1;shu'");
+	SETBPREF("dbg.status", "false", "Set cmd.prompt to '.dr*' or '.dr*;drd;sr PC;pi 1;shu'");
 #if DEBUGGER
 	SETCB("dbg.backend", "native", &cb_dbgbackend, "Select the debugger backend");
 #else

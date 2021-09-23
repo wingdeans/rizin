@@ -267,8 +267,20 @@ if get_option('use_libuv')
   endif
 endif
 
+# handle tree-sitter
+r = run_command(py3_exe, check_meson_subproject_py, 'tree-sitter')
+if r.returncode() == 1 and get_option('subprojects_check')
+  error('Subprojects are not updated. Please run `git clean -dxff subprojects/` to delete all local subprojects directories. If you want to compile against current subprojects then set option `subprojects_check=false`.')
+endif
+
+tree_sitter_dep = dependency('tree-sitter', required: get_option('use_sys_tree_sitter'), static: is_static_build, fallback: [])
+if not tree_sitter_dep.found()
+  tree_sitter_proj = subproject('tree-sitter', default_options: ['default_library=static'])
+  tree_sitter_dep = tree_sitter_proj.get_variable('tree_sitter_dep')
+endif
+
 has_debugger = get_option('debugger')
-have_ptrace = not ['windows', 'cygwin', 'sunos'].contains(host_machine.system())
+have_ptrace = not ['windows', 'cygwin', 'sunos', 'haiku'].contains(host_machine.system())
 use_ptrace_wrap = ['linux'].contains(host_machine.system())
 
 have_ptrace = have_ptrace and has_debugger
@@ -297,6 +309,7 @@ userconf.set10('HAVE_LIB_XXHASH', xxhash_dep.found())
 userconf.set10('USE_LIB_XXHASH', xxhash_dep.found())
 userconf.set10('DEBUGGER', has_debugger)
 userconf.set('PREFIX', rizin_prefix)
+userconf.set('BINDIR', rizin_bindir)
 userconf.set('LIBDIR', rizin_libdir)
 userconf.set('INCLUDEDIR', rizin_incdir)
 userconf.set('DATADIR_RZ', rizin_datdir_rz)
@@ -319,11 +332,15 @@ userconf.set10('WANT_DYLINK', true)
 userconf.set10('HAVE_PTRACE', have_ptrace)
 userconf.set10('USE_PTRACE_WRAP', use_ptrace_wrap)
 userconf.set10('WITH_GPL', true)
+userconf.set10('RZ_BUILD_DEBUG', get_option('buildtype').startswith('debug'))
 ok = cc.has_header_symbol('sys/personality.h', 'ADDR_NO_RANDOMIZE')
 userconf.set10('HAVE_DECL_ADDR_NO_RANDOMIZE', ok)
+ok = cc.has_header_symbol('sys/procctl.h', 'PROC_ASLR_CTL')
+userconf.set10('HAVE_DECL_PROCCTL_ASLR_CTL', ok)
 
 if host_machine.system() == 'freebsd'
   add_project_link_arguments('-Wl,--unresolved-symbols,ignore-in-object-files', language: 'c')
+  add_project_link_arguments('-Wl,--allow-shlib-undefined', language: 'c')
 endif
 
 lrt = []
@@ -335,6 +352,11 @@ code = '#include <unistd.h>\nextern char **environ;\nint main() { char **env = e
 have_environ = cc.links(code, name: 'have extern char **environ')
 userconf.set10('HAVE_ENVIRON', have_environ)
 message('HAVE_ENVIRON: @0@'.format(have_environ))
+
+code = '#if __is_target_os(ios)\nint x = 0;\n#endif\nint main() { x++; }'
+is_ios = cc.links(code, name: 'target is ios')
+userconf.set10('IS_IOS', is_ios)
+message('IS_IOS: @0@'.format(is_ios))
 
 foreach item : [
     ['arc4random_uniform', '#include <stdlib.h>', []],
@@ -350,7 +372,13 @@ foreach item : [
     ['execl', '#include <unistd.h>', []],
     ['system', '#include <stdlib.h>', []],
     ['fork', '#include <unistd.h>', []],
-    ['pipe2', '#define _GNU_SOURCE\n#include <fcntl.h>\n#include <unistd.h>', []]
+    ['nice', '#include <unistd.h>', []],
+    ['copyfile', '#include <copyfile.h>', []],
+    ['strlcpy', '#include <string.h>', []],
+    ['openpty', '', [utl]],
+    ['forkpty', '', [utl]],
+    ['login_tty', '', [utl]],
+    ['pipe2', '#define _GNU_SOURCE\n#include <fcntl.h>\n#include <unistd.h>', []],
   ]
   func = item[0]
   ok = cc.has_function(func, prefix: item[1], dependencies: item[2])
@@ -540,6 +568,7 @@ subdir('librz/core')
 subdir('librz/analysis/d')
 subdir('librz/asm/d')
 subdir('librz/asm/cpus')
+subdir('librz/asm/platforms')
 subdir('librz/bin/d')
 subdir('librz/syscall/d')
 subdir('librz/reg/d')
