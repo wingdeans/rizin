@@ -62,7 +62,6 @@ static bool read_reloc_entry_aux(ELFOBJ *bin, Elf_(Rela) * reloc, ut64 offset, u
 		!Elf_(rz_bin_elf_read_word_xword)(bin, &offset, &reloc->rz_info)) {
 		return false;
 	}
-
 	if (mode == DT_REL) {
 		reloc->rz_addend = 0;
 		return true;

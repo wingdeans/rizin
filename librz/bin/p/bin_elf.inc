@@ -919,27 +919,46 @@ static void patch_reloc(struct Elf_(rz_bin_elf_obj_t) * obj, RzBinElfReloc *rel,
 		switch (rel->type) {
 		case RZ_AARCH64_ADR_PREL_PG_HI21:
 		case RZ_AARCH64_ADR_PREL_PG_HI21_NC:
-		case RZ_AARCH64_ADR_GOT_PAGE:
+		case RZ_AARCH64_ADR_GOT_PAGE: {
 			// Reencode ADR imm
 			orig = rz_read_le32(buf);
 			keep = orig & ~(ADR_IMM_MASK1 | ADR_IMM_MASK2);
 			val = PG(S + A) - PG(P);
+			ut64 mask = ((val & RZ_BIT_MASK32(2, 0)) << 29) | ((val & ADR_IMM_MASK3) << 3);
+			eprintf("REL type %d at 0x%08" PFMT64x " addend = 0x%08" PFMT64x " source = 0x%08" PFMT64x "\n",
+					rel->type, P, A, S);
+			eprintf("REL: orig = 0x%08" PFMT64x " mask = 0x%08" PFMT64x " keep = 0x%08" PFMT64x " val = 0x%08" PFMT64x "\n",
+					orig, mask, keep, val);
 			rz_write_le32(buf, keep | ((val & RZ_BIT_MASK32(2, 0)) << 29) | ((val & ADR_IMM_MASK3) << 3));
 			orig = rz_read_le32(buf);
+			eprintf("REL: after = 0x%08" PFMT64x "\n", orig);
 			break;
+		}
 		case RZ_AARCH64_JUMP26:
 		case RZ_AARCH64_CALL26:
 			// Reencode 26 bits of the offset
 			keep = rz_read_le32(buf) & ~RZ_BIT_MASK32(26, 0);
 			val = S + A;
+			eprintf("REL type %d at 0x%08" PFMT64x " addend = 0x%08" PFMT64x " source = 0x%08" PFMT64x "\n",
+					rel->type, P, A, S);
+			eprintf("REL: keep = 0x%08" PFMT64x " val = 0x%08" PFMT64x "\n",
+					keep, val);
 			rz_write_le32(buf, keep | (val & RZ_BIT_MASK32(26, 0)));
+			orig = rz_read_le32(buf);
+			eprintf("REL: after = 0x%08" PFMT64x "\n", orig);
 			break;
 		case RZ_AARCH64_ADD_ABS_LO12_NC:
 		case RZ_AARCH64_LD64_GOT_LO12_NC:
 			// Reencode ADD or LD/ST imm
 			keep = rz_read_le32(buf) & ~(RZ_BIT_MASK32(12, 0) << 10);
-			val = PG_OFFSET(S + A);
+			val = PG_OFFSET(P + A);
+			eprintf("REL type %d at 0x%08" PFMT64x " addend = 0x%08" PFMT64x " source = 0x%08" PFMT64x "\n",
+					rel->type, P, A, S);
+			eprintf("REL: keep = 0x%08" PFMT64x " val = 0x%08" PFMT64x "\n",
+					keep, val);
 			rz_write_le32(buf, keep | ((val & RZ_BIT_MASK32(12, 0)) << 10));
+			orig = rz_read_le32(buf);
+			eprintf("REL: after = 0x%08" PFMT64x "\n", orig);
 			break;
 		default:
 			val = S + A;
