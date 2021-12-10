@@ -38,21 +38,21 @@ static RzMsgDigestSize plugin_md5_block_size(void *context) {
 static bool plugin_md5_init(void *context) {
 	rz_return_val_if_fail(context, false);
 
-	MD5_Init((MD5_CTX *)context);
+	MD5Init((MD5_CTX *)context);
 	return true;
 }
 
 static bool plugin_md5_update(void *context, const ut8 *data, ut64 size) {
 	rz_return_val_if_fail(context && data, false);
 
-	MD5_Update((MD5_CTX *)context, data, size);
+	MD5Update((MD5_CTX *)context, data, size);
 	return true;
 }
 
 static bool plugin_md5_final(void *context, ut8 *digest) {
 	rz_return_val_if_fail(context && digest, false);
 
-	MD5_Final(digest, (MD5_CTX *)context);
+	MD5Final(digest, (MD5_CTX *)context);
 	return true;
 }
 
@@ -64,9 +64,9 @@ static bool plugin_md5_small_block(const ut8 *data, ut64 size, ut8 **digest, RzM
 	}
 
 	MD5_CTX ctx;
-	MD5_Init(&ctx);
-	MD5_Update(&ctx, data, size);
-	MD5_Final(dgst, &ctx);
+	MD5Init(&ctx);
+	MD5Update(&ctx, data, size);
+	MD5Final(dgst, &ctx);
 
 	*digest = dgst;
 	if (digest_size) {
@@ -77,8 +77,8 @@ static bool plugin_md5_small_block(const ut8 *data, ut64 size, ut8 **digest, RzM
 
 RzMsgDigestPlugin rz_msg_digest_plugin_md5 = {
 	.name = "md5",
-	.license = "RSA-MD",
-	.author = "RSA Data Security, Inc.",
+	.license = "LGPL2",
+	.author = "Alan DeKok (md5 algorithm implementation), deroad (plugin)",
 	.support_hmac = true,
 	.context_new = plugin_md5_context_new,
 	.context_free = plugin_md5_context_free,
