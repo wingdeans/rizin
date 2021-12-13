@@ -3,16 +3,42 @@
 
 #include <rz_lib.h>
 #include <rz_crypto.h>
-#include "crypto_aes_algo.h"
-
-#define BLOCK_SIZE 16
+#include <rz_util.h>
+#include <aes.h>
 
 typedef struct aes_cbc_context_t {
-	aes_state_t st;
+	struct aes_ctx st;
 	bool iv_set;
 	ut8 iv[32];
 } AesCbcCtx;
 
+static void encrypt(struct aes_ctx *ctx, ut8 *in, ut8 *out) {
+	switch (ctx->key_size) {
+	case 128 / 8:
+		aes128_encrypt(&ctx->u.ctx128, AES_BLOCK_SIZE, out, in);
+		break;
+	case 192 / 8:
+		aes192_encrypt(&ctx->u.ctx192, AES_BLOCK_SIZE, out, in);
+		break;
+	case 256 / 8:
+		aes256_encrypt(&ctx->u.ctx256, AES_BLOCK_SIZE, out, in);
+		break;
+	}
+}
+
+static void decrypt(struct aes_ctx *ctx, ut8 *in, ut8 *out) {
+	switch (ctx->key_size) {
+	case 128 / 8:
+		aes128_decrypt(&ctx->u.ctx128, AES_BLOCK_SIZE, out, in);
+		break;
+	case 192 / 8:
+		aes192_decrypt(&ctx->u.ctx192, AES_BLOCK_SIZE, out, in);
+		break;
+	case 256 / 8:
+		aes256_decrypt(&ctx->u.ctx256, AES_BLOCK_SIZE, out, in);
+		break;
+	}
+}
 static bool aes_cbc_set_key(RzCrypto *cry, const ut8 *key, int keylen, int mode, int direction) {
 	rz_return_val_if_fail(cry->user && key, false);
 
@@ -21,10 +47,33 @@ static bool aes_cbc_set_key(RzCrypto *cry, const ut8 *key, int keylen, int mode,
 	}
 	AesCbcCtx *ctx = (AesCbcCtx *)cry->user;
 
-	ctx->st.key_size = keylen;
-	ctx->st.rounds = 6 + (int)(keylen / 4);
-	ctx->st.columns = (int)(keylen / 4);
-	memcpy(ctx->st.key, key, keylen);
+	ctx->st.key_size = keylen / 8;
+	switch (keylen) {
+	case 128 / 8:
+		if (direction == RZ_CRYPTO_DIR_ENCRYPT) {
+			aes128_set_encrypt_key(&ctx->st.u.ctx128, key);
+		} else {
+			aes128_set_decrypt_key(&ctx->st.u.ctx128, key);
+		}
+		break;
+	case 192 / 8:
+		if (direction == RZ_CRYPTO_DIR_ENCRYPT) {
+			aes192_set_encrypt_key(&ctx->st.u.ctx192, key);
+		} else {
+			aes192_set_decrypt_key(&ctx->st.u.ctx192, key);
+		}
+		break;
+	case 256 / 8:
+		if (direction == RZ_CRYPTO_DIR_ENCRYPT) {
+			aes256_set_encrypt_key(&ctx->st.u.ctx256, key);
+		} else {
+			aes256_set_decrypt_key(&ctx->st.u.ctx256, key);
+		}
+		break;
+	default:
+		rz_warn_if_reached();
+		break;
+	}
 	cry->dir = direction;
 	return true;
 }
@@ -40,10 +89,10 @@ static bool aes_cbc_set_iv(RzCrypto *cry, const ut8 *iv_src, int ivlen) {
 	rz_return_val_if_fail(cry->user && iv_src, false);
 	AesCbcCtx *ctx = (AesCbcCtx *)cry->user;
 
-	if (ivlen != BLOCK_SIZE) {
+	if (ivlen != AES_BLOCK_SIZE) {
 		return false;
 	}
-	memcpy(ctx->iv, iv_src, BLOCK_SIZE);
+	memcpy(ctx->iv, iv_src, AES_BLOCK_SIZE);
 	ctx->iv_set = true;
 	return true;
 }
@@ -64,9 +113,9 @@ static bool update(RzCrypto *cry, const ut8 *buf, int len) {
 		eprintf("IV not set. Use -I [iv]\n");
 		return false;
 	}
-	const int diff = (BLOCK_SIZE - (len % BLOCK_SIZE)) % BLOCK_SIZE;
+	const int diff = (AES_BLOCK_SIZE - (len % AES_BLOCK_SIZE)) % AES_BLOCK_SIZE;
 	const int size = len + diff;
-	const int blocks = size / BLOCK_SIZE;
+	const int blocks = size / AES_BLOCK_SIZE;
 
 	ut8 *const obuf = calloc(1, size);
 	if (!obuf) {
@@ -89,19 +138,19 @@ static bool update(RzCrypto *cry, const ut8 *buf, int len) {
 	int i, j;
 	if (cry->dir == RZ_CRYPTO_DIR_ENCRYPT) {
 		for (i = 0; i < blocks; i++) {
-			for (j = 0; j < BLOCK_SIZE; j++) {
-				ibuf[i * BLOCK_SIZE + j] ^= ctx->iv[j];
+			for (j = 0; j < AES_BLOCK_SIZE; j++) {
+				ibuf[i * AES_BLOCK_SIZE + j] ^= ctx->iv[j];
 			}
-			aes_encrypt(&ctx->st, ibuf + BLOCK_SIZE * i, obuf + BLOCK_SIZE * i);
-			memcpy(ctx->iv, obuf + BLOCK_SIZE * i, BLOCK_SIZE);
+			encrypt(&ctx->st, ibuf + AES_BLOCK_SIZE * i, obuf + AES_BLOCK_SIZE * i);
+			memcpy(ctx->iv, obuf + AES_BLOCK_SIZE * i, AES_BLOCK_SIZE);
 		}
 	} else {
 		for (i = 0; i < blocks; i++) {
-			aes_decrypt(&ctx->st, ibuf + BLOCK_SIZE * i, obuf + BLOCK_SIZE * i);
-			for (j = 0; j < BLOCK_SIZE; j++) {
-				obuf[i * BLOCK_SIZE + j] ^= ctx->iv[j];
+			decrypt(&ctx->st, ibuf + AES_BLOCK_SIZE * i, obuf + AES_BLOCK_SIZE * i);
+			for (j = 0; j < AES_BLOCK_SIZE; j++) {
+				obuf[i * AES_BLOCK_SIZE + j] ^= ctx->iv[j];
 			}
-			memcpy(ctx->iv, buf + BLOCK_SIZE * i, BLOCK_SIZE);
+			memcpy(ctx->iv, buf + AES_BLOCK_SIZE * i, AES_BLOCK_SIZE);
 		}
 	}
 
