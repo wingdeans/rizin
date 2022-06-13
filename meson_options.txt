@@ -40,5 +40,9 @@ option('use_gpl', type: 'boolean', value: true, description: 'Set to false when 
 option('install_sigdb', type: 'boolean', value: false, description: 'Downloads and installs rizin sigdb')
 option('debugger', type: 'boolean', value: true)
 
+option('use_bindings', type: 'feature', value: 'disabled', description: 'Whether to use libclang and swig to generate bindings')
+option('clang_lib_path', type: 'string', description: 'Path to directory containing clang libraries for if `llvm-config --libdir` does not find it')
+option('clang_extra_args', type: 'string', description: 'Extra arguments for libclang')
+
 option('enable_tests', type: 'boolean', value: true, description: 'Build unit tests in test/unit')
 option('enable_rz_test', type: 'boolean', value: true, description: 'Build rz-test executable for regression testing')

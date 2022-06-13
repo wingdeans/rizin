@@ -30,6 +30,10 @@ subdir('core')
 
 subdir('main')
 
+if get_option('use_bindings').enabled()
+  subdir('bindings')
+endif
+
 conf_data = configuration_data()
 conf_data.set('plugins_core', '&rz_core_plugin_' + ', &rz_core_plugin_'.join(core_plugins) + ', 0')
 conf_data.set('plugins_analysis', '&rz_analysis_plugin_' + ', &rz_analysis_plugin_'.join(analysis_plugins) + ', 0')
