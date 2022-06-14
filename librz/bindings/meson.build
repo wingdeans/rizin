@@ -5,8 +5,6 @@ if clang_lib_path == ''
 endif
 
 clang_args = get_option('clang_extra_args')
-clang_args += ' -I' + join_paths(meson.current_source_dir(), '..', 'include')
-clang_args += ' -I' + join_paths(meson.current_source_dir(), '..', 'subprojects', 'sdb', 'src')
 
 custom_target(
   'generate_swig',
@@ -16,5 +14,6 @@ custom_target(
     find_program('python3'), '@INPUT@',
     '-o', '@OUTPUT@',
     '--clang-lib-path', clang_lib_path,
-  ] + (clang_args == '' ? [] : [ '--clang-args', clang_args ])
+  ] + (clang_args == '' ? [] : [ '--clang-args', clang_args ]),
+  depend_files: [ rz_userconf_h ]
 )
