@@ -1508,6 +1508,11 @@ class Cursor(Structure):
         """
         return conf.lib.clang_EnumDecl_isScoped(self)
 
+    def is_macro_functionlike(self):
+        """Returns True if the cursor refers to a functionlike macro
+        """
+        return conf.lib.clang_Cursor_isMacroFunctionLike(self)
+    
     def get_definition(self):
         """
         If the cursor is a reference to a declaration or a declaration of
@@ -4000,6 +4005,10 @@ functionList = [
    [Cursor],
    bool),
 
+  ("clang_Cursor_isMacroFunctionLike",
+   [Cursor],
+   bool),
+    
   ("clang_Cursor_getBriefCommentText",
    [Cursor],
    _CXString,
@@ -4051,7 +4060,7 @@ functionList = [
 
   ("clang_Type_visitFields",
    [Type, callbacks['fields_visit'], py_object],
-   c_uint),
+   c_uint)
 ]
 
 class LibclangError(Exception):
