@@ -1,5 +1,7 @@
-from header import Header
-from nodes import Struct, Func
+from clang.cindex import TypeKind
+
+from header import Header, Query
+from nodes import Node, Struct, Func
 from enum import Enum
 
 from typing import List, Set, Optional
@@ -17,10 +19,10 @@ class Module:
             name: str
             type: FuncType
             
-            def __init__(self, header: Header, func_name: str, *,
+            def __init__(self, header: Header, func: Func,
                          rename: Optional[str]=None,
                          type: Optional[FuncType]=None):
-                self.func = header.get_only(name=func_name, type=Func)
+                self.func = func
                 self.name = rename or self.func.name
                 self.type = type or FuncType.FORWARD
         
@@ -34,14 +36,35 @@ class Module:
         def add_func(self, header: Header, func_name: str, *,
                      rename: Optional[str]=None,
                      type: Optional[FuncType]=None) -> None:
-            func = Module._Class._Func(header, func_name, rename=rename, type=type)
-            self.funcs.append(func)
+            func = header.get_only(name=func_name, type=Func)
+            
+            header.used.add(func)
+            self.funcs.append(Module._Class._Func(header, func, rename=rename, type=type))
 
         def add_constructor(self, header: Header, func_name: str) -> None:
             self.add_func(header, func_name, rename=self.struct.name, type=FuncType.CONSTRUCTOR)
 
         def add_destructor(self, header: Header, func_name: str) -> None:
             self.add_func(header, func_name, rename="~" + self.struct.name, type=FuncType.DESTRUCTOR)
+
+        def add_prefixed_methods(self, header: Header, prefix: str) -> None:
+            def first_arg_check(node: Node) -> bool:
+                assert type(node) is Func
+                if len(node.args) == 0:
+                    return False
+                arg = node.args[0]
+                return (arg.type.kind == TypeKind.POINTER and
+                        arg.type.get_pointee().get_canonical() == self.struct.type)
+
+            query = Query.all(
+                Query.startswith(prefix),
+                first_arg_check,
+                Query.unused(header)
+            )
+            
+            for func in header.get_all(query, type=Func):
+                self.funcs.append(Module._Class._Func(header, func, type=FuncType.THIS,
+                                                      rename=func.name[len(prefix):]))
             
     name: str
     headers: Set[Header]

@@ -54,7 +54,7 @@ class Func(Node):
         for arg in cursor.get_arguments():
             self.args.append(Func.Arg(arg))
 
-class Struct(Node):
+class Struct(TypedNode):
     class Field(TypedNode): pass
     class UnionField(Field):
         fields: List["Struct.Field"]

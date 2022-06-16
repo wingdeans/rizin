@@ -1,5 +1,5 @@
 from clang.cindex import TranslationUnit, CursorKind
-from typing import List, DefaultDict, OrderedDict, Callable, TypeVar, Type, Optional, overload, Union
+from typing import List, DefaultDict, OrderedDict, Set, Callable, TypeVar, Type, Optional, overload, Union
 import os
 import logging
 
@@ -29,11 +29,16 @@ class Query:
     def all(*queries: QueryType) -> QueryType:
         return lambda node: all(query(node) for query in queries)
 
+    @staticmethod
+    def unused(header: "Header") -> QueryType:
+        return lambda node: node not in header.used
+
 T = TypeVar("T", bound=Node) # Used for queries with a specified type
 class Header:
     name: str
     nodes: OrderedDict[str, Node]
     nodes_by_type: DefaultDict[Type[Node], OrderedDict[str, Node]]
+    used: Set[Node]
     
     def __init__(self, name: str) -> None:
         self.name = name
@@ -47,6 +52,7 @@ class Header:
         for diag in tu.diagnostics:
             logging.warn(diag)
 
+        self.used = set()
         self.nodes = OrderedDict()
         self.nodes_by_type = DefaultDict(OrderedDict)
         for child in tu.cursor.get_children():

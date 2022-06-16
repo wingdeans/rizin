@@ -34,6 +34,7 @@ class Type:
     def get_pointee(self) -> Type: pass
     def get_result(self) -> Type: pass
     def argument_types(self) -> Iterator[Type]: pass
+    def get_canonical(self) -> Type: pass
     
     spelling: str
     kind: TypeKind
