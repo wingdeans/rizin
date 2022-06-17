@@ -1,7 +1,6 @@
-from clang.cindex import TypeKind
+from clang.wrapper import CursorKind, TypeKind, Struct, StructField
 from typing import TextIO, List, Optional
 
-from nodes import Struct
 from binder import Module, FuncType
 
 class Writer:
@@ -34,40 +33,47 @@ class Writer:
         self._indent -= 1
         assert self._indent >= 0
         
-def generate_field(field: Struct.Field, writer: Writer) -> None:
+def generate_field(field: StructField, writer: Writer) -> None:
     # Rewrite array and function pointer types to put field name in correct place
     if field.type.kind == TypeKind.CONSTANTARRAY:
-        writer.line(field.type.element_type.spelling, " ", field.name, "[", field.type.element_count, "];")
+        writer.line(field.type.element_type.spelling, " ", field.spelling, "[", field.type.element_count, "];")
     elif (field.type.kind == TypeKind.POINTER and
           (pointee := field.type.get_pointee()) and
           pointee.kind == TypeKind.FUNCTIONPROTO):
         args = pointee.argument_types()
-        writer.line(pointee.get_result().spelling, " (*", field.name, ")",
+        writer.line(pointee.get_result().spelling, " (*", field.spelling, ")",
                     "(", ", ".join([arg.spelling for arg in args]), ");")
     else:
-        writer.line(field.type.spelling, " ", field.name, ";")
+        writer.line(field.type.spelling, " ", field.spelling, ";")
             
 def generate_struct(struct: Struct, writer: Writer) -> None:
-    writer.line("struct ", struct.name, " {")
+    writer.line("struct ", struct.spelling, " {")
     writer.indent()
-    for field in struct.fields:
-        if isinstance(field, Struct):
+    for field in struct.get_children():
+        if field.kind == CursorKind.STRUCT_DECL:
             generate_struct(field, writer)
-        elif isinstance(field, Struct.UnionField):
+        elif field.kind == CursorKind.UNION_DECL:
             writer.line("union {")
             writer.indent()
-            for union_field in field.fields:
+            for union_field in field.get_children():
+                assert union_field.kind == CursorKind.FIELD_DECL
                 generate_field(union_field, writer)
             writer.dedent()
-            writer.line("} ", field.name, ";")
-        else:
+            writer.line("} ", field.spelling, ";")
+        elif field.kind == CursorKind.FIELD_DECL:
             generate_field(field, writer)
+        else:
+            raise Exception(f"Unexpected struct child of kind: {field.kind}")
     writer.dedent()
     writer.line("};")
 
-def generate_func(fn: Module._Class._Func, writer: Writer) -> None:
-    args_inner = [arg.name for arg in fn.func.args]
-    args_outer = [(arg.type.spelling, arg.name) for arg in fn.func.args]
+def generate_func(fn: Module.BinderClass.BinderFunc, writer: Writer) -> None:
+    args_inner = []
+    args_outer = []
+    for arg in fn.func.get_arguments():
+        assert arg.kind == CursorKind.PARM_DECL
+        args_inner.append(arg.spelling)
+        args_outer.append((arg.type.spelling, arg.spelling))
 
     if fn.type in [FuncType.THIS, FuncType.DESTRUCTOR]:
         args_outer = args_outer[1:] # don't accept first argument
@@ -79,11 +85,11 @@ def generate_func(fn: Module._Class._Func, writer: Writer) -> None:
     else:
         writer.line(fn.func.result_type.spelling, " ", fn.name, "(", args_outer_str, ") {")
     writer.indent()
-    writer.line("return ", fn.func.name, "(", ", ".join(args_inner), ");")
+    writer.line("return ", fn.func.spelling, "(", ", ".join(args_inner), ");")
     writer.dedent()
     writer.line("};")
     
-def generate_class(cls: Module._Class, writer: Writer) -> None:
+def generate_class(cls: Module.BinderClass, writer: Writer) -> None:
     """
     struct ... {
     };
@@ -93,7 +99,7 @@ def generate_class(cls: Module._Class, writer: Writer) -> None:
     """
     generate_struct(cls.struct, writer)
 
-    writer.line("%extend ", cls.struct.name, " {")
+    writer.line("%extend ", cls.struct.spelling, " {")
     writer.indent()
     for func in cls.funcs:
         generate_func(func, writer)

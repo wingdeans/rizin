@@ -27,11 +27,11 @@ rz_core.add_destructor(core_h, "rz_core_free")
 # ignore format strings
 for func_name in ["rz_core_notify_begin", "rz_core_notify_done", "rz_core_notify_error",
         "rz_core_cmd_strf", "rz_core_cmdf", "rz_core_syscallf"]:
-    core_h.used.add(core_h.get_only(name=func_name))
+    core_h.used.add(func_name)
 
 # undefined symbols (?)
 for func_name in ["rz_core_pseudo_code", "rz_core_echo", "rz_core_config_eval_and_print"]:
-    core_h.used.add(core_h.get_only(name=func_name))
+    core_h.used.add(func_name)
     
 rz_core.add_prefixed_methods(core_h, "rz_core_")
 

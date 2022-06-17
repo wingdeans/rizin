@@ -1,7 +1,5 @@
-from clang.cindex import TypeKind
-
-from header import Header, Query
-from nodes import Node, Struct, Func
+from header import Header
+from clang.wrapper import TypeKind, CursorKind, Cursor, Struct, Func
 from enum import Enum
 
 from typing import List, Set, Optional
@@ -13,8 +11,8 @@ class FuncType(Enum):
     DESTRUCTOR   = 3
 
 class Module:
-    class _Class:
-        class _Func:
+    class BinderClass:
+        class BinderFunc:
             func: Func
             name: str
             type: FuncType
@@ -23,61 +21,65 @@ class Module:
                          rename: Optional[str]=None,
                          type: Optional[FuncType]=None):
                 self.func = func
-                self.name = rename or self.func.name
+                self.name = rename or self.func.spelling
                 self.type = type or FuncType.FORWARD
         
         struct: Struct
-        funcs: List[_Func]
+        funcs: List[BinderFunc]
         
         def __init__(self, outer: "Module", header: Header, struct_name: str):
-            self.struct = header.get_only(name=struct_name, type=Struct)
+            struct = header.nodes[struct_name]
+            assert struct.kind == CursorKind.STRUCT_DECL
+            self.struct = struct
             self.funcs = []
 
         def add_func(self, header: Header, func_name: str, *,
                      rename: Optional[str]=None,
                      type: Optional[FuncType]=None) -> None:
-            func = header.get_only(name=func_name, type=Func)
+            func = header.nodes[func_name]
+            assert func.kind == CursorKind.FUNCTION_DECL
             
-            header.used.add(func)
-            self.funcs.append(Module._Class._Func(header, func, rename=rename, type=type))
+            header.used.add(func.spelling)
+            self.funcs.append(Module.BinderClass.BinderFunc(header, func, rename=rename, type=type))
 
         def add_constructor(self, header: Header, func_name: str) -> None:
-            self.add_func(header, func_name, rename=self.struct.name, type=FuncType.CONSTRUCTOR)
+            self.add_func(header, func_name, rename=self.struct.spelling, type=FuncType.CONSTRUCTOR)
 
         def add_destructor(self, header: Header, func_name: str) -> None:
-            self.add_func(header, func_name, rename="~" + self.struct.name, type=FuncType.DESTRUCTOR)
+            self.add_func(header, func_name, rename="~" + self.struct.spelling, type=FuncType.DESTRUCTOR)
 
         def add_prefixed_methods(self, header: Header, prefix: str) -> None:
-            def first_arg_check(node: Node) -> bool:
-                assert type(node) is Func
-                if len(node.args) == 0:
-                    return False
-                arg = node.args[0]
-                return (arg.type.kind == TypeKind.POINTER and
-                        arg.type.get_pointee().get_canonical() == self.struct.type)
+            def predicate(cursor: Cursor) -> bool:
+                if cursor.spelling in header.used: return False # not used
+                if cursor.kind != CursorKind.FUNCTION_DECL: return False # is function
+                if not cursor.spelling.startswith(prefix): return False # correct prefix
 
-            query = Query.all(
-                Query.startswith(prefix),
-                first_arg_check,
-                Query.unused(header)
-            )
-            
-            for func in header.get_all(query, type=Func):
-                self.funcs.append(Module._Class._Func(header, func, type=FuncType.THIS,
-                                                      rename=func.name[len(prefix):]))
+                args = list(cursor.get_arguments())
+                if len(args) == 0: return False
+                
+                arg = args[0]
+                assert arg.kind == CursorKind.PARM_DECL
+
+                if arg.type.kind != TypeKind.POINTER: return False
+                return arg.type.get_pointee().get_canonical() == self.struct.type
+
+            for func in filter(predicate, header.nodes.values()):
+                assert func.kind == CursorKind.FUNCTION_DECL
+                self.funcs.append(Module.BinderClass.BinderFunc(header, func, type=FuncType.THIS,
+                                                                rename=func.spelling[len(prefix):]))
             
     name: str
     headers: Set[Header]
-    classes: List[_Class]
+    classes: List[BinderClass]
 
     def __init__(self, name: str):
         self.name = name
         self.headers = set()
         self.classes = []
 
-    def Class(self, header: Header, struct_name: str) -> _Class:
+    def Class(self, header: Header, struct_name: str) -> BinderClass:
         self.headers.add(header)
         
-        result = Module._Class(self, header, struct_name)
+        result = Module.BinderClass(self, header, struct_name)
         self.classes.append(result)
         return result
