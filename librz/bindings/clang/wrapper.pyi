@@ -5,42 +5,56 @@ from typing import Union, Literal, Iterator, final
 """
 Type kinds/base
 """
+
 class TypeKind(PyEnum):
-    __placeholder__: TypeKind # union being exhaustive breaks things
-    
+    __placeholder__: TypeKind  # union being exhaustive breaks things
+
     CONSTANTARRAY: TypeKind
+    INCOMPLETEARRAY: TypeKind
     POINTER: TypeKind
     FUNCTIONPROTO: TypeKind
 
 class TypeBase:
     spelling: str
-    def get_canonical(self) -> Type: pass
+    def get_canonical(self) -> Type:
+        pass
+    def get_declaration(self) -> Cursor:
+        pass
 
 """
 Types
 """
+
 class Array(TypeBase):
     kind: Literal[TypeKind.CONSTANTARRAY]
     element_type: Type
     element_count: int
 
+class IncompleteArray(TypeBase):
+    kind: Literal[TypeKind.INCOMPLETEARRAY]
+    element_type: Type
+
 class Pointer(TypeBase):
     kind: Literal[TypeKind.POINTER]
-    def get_pointee(self) -> Type: pass
+    def get_pointee(self) -> Type:
+        pass
 
 class FuncType(TypeBase):
     kind: Literal[TypeKind.FUNCTIONPROTO]
-    def get_result(self) -> Type: pass
-    def argument_types(self) -> Iterator[Type]: pass
+    def get_result(self) -> Type:
+        pass
+    def argument_types(self) -> Iterator[Type]:
+        pass
 
-Type = Union[Array, Pointer, FuncType]
+Type = Union[Array, IncompleteArray, Pointer, FuncType]
 
 """
 Cursor kinds/base
 """
+
 class CursorKind(PyEnum):
-    __placeholder__: TypeKind # union being exhaustive breaks things
-    
+    __placeholder__: TypeKind  # union being exhaustive breaks things
+
     TRANSLATION_UNIT: CursorKind
 
     INCLUSION_DIRECTIVE: CursorKind
@@ -60,7 +74,7 @@ class CursorKind(PyEnum):
 
 class Token:
     spelling: str
-    
+
 class CursorBase:
     class SourceLocation:
         class File:
@@ -73,42 +87,50 @@ class CursorBase:
 
 class RootCursor(CursorBase):
     kind: Literal[CursorKind.TRANSLATION_UNIT]
-    def get_children(self) -> Iterator[Cursor]: pass
-    
+    def get_children(self) -> Iterator[Cursor]:
+        pass
+
 """
 Main cursors
 """
+
 class Macro(CursorBase):
     kind: Literal[CursorKind.MACRO_DEFINITION]
-    def is_macro_functionlike(self) -> bool: pass
-    def get_tokens(self) -> Iterator[Token]: pass
-    
+    def is_macro_functionlike(self) -> bool:
+        pass
+    def get_tokens(self) -> Iterator[Token]:
+        pass
+
 class Var(CursorBase):
     kind: Literal[CursorKind.VAR_DECL]
     type: Type
 
 class Func(CursorBase):
     kind: Literal[CursorKind.FUNCTION_DECL]
-    def get_arguments(self) -> Iterator[Cursor]: pass
+    def get_arguments(self) -> Iterator[Cursor]:
+        pass
     # def get_children(self) -> Iterator[Cursor]: pass
     result_type: Type
 
 class Struct(CursorBase):
     kind: Literal[CursorKind.STRUCT_DECL]
     type: Type
-    def get_children(self) -> Iterator[Cursor]: pass
+    def get_children(self) -> Iterator[Cursor]:
+        pass
 
 class Enum(CursorBase):
     kind: Literal[CursorKind.ENUM_DECL]
-    def get_children(self) -> Iterator[Cursor]: pass
+    def get_children(self) -> Iterator[Cursor]:
+        pass
 
 class Typedef(CursorBase):
     kind: Literal[CursorKind.TYPEDEF_DECL]
     underlying_typedef_type: Type
-    
+
 """
 Additional cursors
 """
+
 class Param(CursorBase):
     kind: Literal[CursorKind.PARM_DECL]
     type: Type
@@ -119,7 +141,9 @@ class StructField(CursorBase):
 
 class StructUnionField(CursorBase):
     kind: Literal[CursorKind.UNION_DECL]
-    def get_children(self) -> Iterator[Cursor]: pass
+    def get_children(self) -> Iterator[Cursor]:
+        pass
 
-Cursor = Union[Macro, Var, Func, Struct, Enum, Typedef,
-               Param, StructField, StructUnionField]
+Cursor = Union[
+    Macro, Var, Func, Struct, Enum, Typedef, Param, StructField, StructUnionField
+]

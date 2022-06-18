@@ -52,11 +52,15 @@ class Module:
                 self.type = type_ or FuncType.FORWARD
 
         struct: Struct
+        rename: Optional[str]
         funcs: List[BinderFunc]
 
-        def __init__(self, header: Header, struct_name: str):
+        def __init__(
+            self, header: Header, struct_name: str, *, rename: Optional[str] = None
+        ):
             struct = header.nodes[struct_name]
             assert struct.kind == CursorKind.STRUCT_DECL
+            self.rename = rename
             self.struct = struct
             self.funcs = []
 
@@ -107,11 +111,9 @@ class Module:
             and take in a pointer to the class as their first argument
             """
 
-            def predicate(cursor: Cursor) -> bool:
+            def predicate(cursor: Func) -> bool:
                 if cursor.spelling in header.used:
                     return False  # not used
-                if cursor.kind != CursorKind.FUNCTION_DECL:
-                    return False  # is function
                 if not cursor.spelling.startswith(prefix):
                     return False  # correct prefix
 
@@ -124,10 +126,12 @@ class Module:
 
                 if arg.type.kind != TypeKind.POINTER:
                     return False
-                return arg.type.get_pointee().get_canonical() == self.struct.type
+                return (
+                    arg.type.get_pointee().get_canonical().get_declaration()
+                    == self.struct
+                )
 
-            for func in filter(predicate, header.nodes.values()):
-                assert func.kind == CursorKind.FUNCTION_DECL
+            for func in filter(predicate, header.funcs):
                 self.funcs.append(
                     Module.BinderClass.BinderFunc(
                         func,
@@ -135,6 +139,29 @@ class Module:
                         rename=func.spelling[len(prefix) :],
                     )
                 )
+                header.used.add(func.spelling)
+
+        def add_prefixed_funcs(self, header: Header, prefix: str) -> None:
+            """
+            Add all functions in the header which match the specified prefix
+            as static methods of the class
+            """
+
+            def predicate(cursor: Func) -> bool:
+                if cursor.spelling in header.used:
+                    return False  # not used
+                if not cursor.spelling.startswith(prefix):
+                    return False  # correct prefix
+                return True
+
+            for func in filter(predicate, header.funcs):
+                self.funcs.append(
+                    Module.BinderClass.BinderFunc(
+                        func,
+                        rename=func.spelling[len(prefix) :],
+                    )
+                )
+                header.used.add(func.spelling)
 
     name: str
     headers: Set[Header]
@@ -145,12 +172,14 @@ class Module:
         self.headers = set()
         self.classes = []
 
-    def Class(self, header: Header, struct_name: str) -> BinderClass:
+    def Class(
+        self, header: Header, struct_name: str, *, rename: Optional[str] = None
+    ) -> BinderClass:
         """
         Create a class from a struct in the given header
         """
         self.headers.add(header)
 
-        result = Module.BinderClass(header, struct_name)
+        result = Module.BinderClass(header, struct_name, rename=rename)
         self.classes.append(result)
         return result

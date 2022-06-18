@@ -7,13 +7,13 @@ endif
 clang_args = get_option('clang_extra_args')
 
 swig_modules = [
-  'core'
+  'rizin'
 ]
 
 swig_sources = custom_target(
   'generate_swig_sources',
   input: 'main.py',
-  output: 'core.i',
+  output: 'rizin.i',
   command: [
     find_program('python3'), '@INPUT@',
     '-o', '@OUTDIR@',

@@ -6,7 +6,14 @@ from typing import TextIO, List, Iterator
 from string import Template
 from contextlib import contextmanager
 
-from clang.wrapper import CursorKind, TypeKind, Struct, StructField, StructUnionField
+from clang.wrapper import (
+    CursorKind,
+    TypeKind,
+    Struct,
+    StructField,
+    StructUnionField,
+    Type,
+)
 
 from binder import Module, FuncType
 
@@ -47,29 +54,27 @@ class Writer:
         self._indent -= 1
 
 
+def stringify_decl(type_: Type, name: str) -> str:
+    while type_.kind == TypeKind.POINTER:
+        type_ = type_.get_pointee()
+        name = "*" + name
+
+    if type_.kind == TypeKind.CONSTANTARRAY:
+        name = f"{name}[{type_.element_count}]"
+        type_ = type_.element_type
+    elif type_.kind == TypeKind.INCOMPLETEARRAY:
+        name = f"{name}[]"
+        type_ = type_.element_type
+    elif type_.kind == TypeKind.FUNCTIONPROTO:
+        args = ", ".join(arg.spelling for arg in type_.argument_types())
+        name = f"({name})({args})"
+        type_ = type_.get_result()
+
+    return f"{type_.spelling} {name}"
+
+
 def generate_field(field: StructField, writer: Writer) -> None:
-    # Rewrite array and function pointer types to put field name in correct place
-    if field.type.kind == TypeKind.CONSTANTARRAY:
-        writer.line(
-            "$type $name[$length];",
-            type=field.type.element_type.spelling,
-            name=field.spelling,
-            length=field.type.element_count,
-        )
-        return
-
-    if field.type.kind == TypeKind.POINTER:
-        pointee = field.type.get_pointee()
-        if pointee.kind == TypeKind.FUNCTIONPROTO:
-            writer.line(
-                "$return_type (*$name)($args);",
-                return_type=pointee.get_result().spelling,
-                name=field.spelling,
-                args=", ".join([arg.spelling for arg in pointee.argument_types()]),
-            )
-            return
-
-    writer.line("$type $name;", type=field.type.spelling, name=field.spelling)
+    writer.line("$decl;", decl=stringify_decl(field.type, field.spelling))
 
 
 def generate_struct(struct: Struct, writer: Writer) -> None:
@@ -101,13 +106,13 @@ def generate_func(binder_func: Module.BinderClass.BinderFunc, writer: Writer) ->
     for arg in binder_func.func.get_arguments():
         assert arg.kind == CursorKind.PARM_DECL
         args_inner.append(arg.spelling)
-        args_outer.append((arg.type.spelling, arg.spelling))
+        args_outer.append(stringify_decl(arg.type, arg.spelling))
 
     if binder_func.type in [FuncType.THIS, FuncType.DESTRUCTOR]:
         args_outer = args_outer[1:]  # don't accept first argument
         args_inner[0] = "$self"  # instead use self
 
-    args_outer_str = ", ".join([f"{type} {name}" for (type, name) in args_outer])
+    args_outer_str = ", ".join(args_outer)
     if binder_func.type in [
         FuncType.CONSTRUCTOR,
         FuncType.DESTRUCTOR,
@@ -115,18 +120,20 @@ def generate_func(binder_func: Module.BinderClass.BinderFunc, writer: Writer) ->
         writer.line("$name($args) {", name=binder_func.name, args=args_outer_str)
     else:
         writer.line(
-            "$return_type $name($args) {",
+            "$visibility$return_type $name($args) {",
+            visibility="" if binder_func.type == FuncType.THIS else "static ",
             return_type=binder_func.func.result_type.spelling,
             name=binder_func.name,
             args=args_outer_str,
         )
+
     with writer.indent():
         writer.line(
             "return $name($args);",
             name=binder_func.func.spelling,
             args=", ".join(args_inner),
         )
-    writer.line("};")
+    writer.line("}")
 
 
 def generate_class(cls: Module.BinderClass, writer: Writer) -> None:
@@ -139,6 +146,8 @@ def generate_class(cls: Module.BinderClass, writer: Writer) -> None:
     """
     generate_struct(cls.struct, writer)
 
+    if cls.rename:
+        writer.line("%rename ($new) $old;", new=cls.rename, old=cls.struct.spelling)
     writer.line("%extend $struct {", struct=cls.struct.spelling)
     with writer.indent():
         for func in cls.funcs:
