@@ -36,7 +36,7 @@ class Header:
 
     name: str
     nodes: OrderedDict[str, Cursor]
-    used: Set[str]
+    used: Set[Cursor]
 
     macros: List[Macro]
     vars: List[Var]
@@ -48,13 +48,22 @@ class Header:
     def __init__(self, name: str) -> None:
         self.name = name
         filename = os.path.join(os.path.dirname(__file__), "..", "include", name)
-        translation_unit = TranslationUnit.from_source(
-            filename,
-            args=HeaderConfig.extra_args + HeaderConfig.args,
-            options=TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD,
-        )
+
+        try:
+            translation_unit = TranslationUnit.from_source(
+                filename,
+                args=HeaderConfig.extra_args + HeaderConfig.args,
+                options=TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD,
+            )
+        except:
+            raise Exception(f"Error parsing translation unit from file: {self.name}")
 
         for diag in translation_unit.diagnostics:
+            if diag.spelling in [
+                "'openssl/bn.h' file not found",
+                "'sdb_version.h' file not found",
+            ]:
+                continue
             print(diag)
 
         self.used = set()
@@ -79,32 +88,26 @@ class Header:
             ]:
                 continue
 
-            # Macro
             if cursor.kind == CursorKind.MACRO_DEFINITION:
                 self.macros.append(cursor)
-
-            # Variable
             elif cursor.kind == CursorKind.VAR_DECL:
                 self.vars.append(cursor)
-
-            # Function
             elif cursor.kind == CursorKind.FUNCTION_DECL:
                 self.funcs.append(cursor)
-
-            # Struct
             elif cursor.kind == CursorKind.STRUCT_DECL:
                 self.structs.append(cursor)
-
-            # Enum
             elif cursor.kind == CursorKind.ENUM_DECL:
                 self.enums.append(cursor)
-
-            # Typedef
             elif cursor.kind == CursorKind.TYPEDEF_DECL:
                 self.typedefs.append(cursor)
 
+            # REMOVE
+            elif cursor.kind in [CursorKind.UNION_DECL]:
+                pass
             else:
-                raise Exception(f"Unexpected toplevel node of kind: {str(cursor.kind)}")
+                raise Exception(
+                    f"Unexpected toplevel node of kind: {str(cursor.kind)} in file: {self.name}"
+                )
 
             # Add to nodes OrderedDict
             if not cursor.spelling:
@@ -117,7 +120,7 @@ class Header:
                 else:
                     raise Exception(
                         f"Unexpected redefinition of symbol: {cursor.spelling}, "
-                        f"with type: {cursor.kind}"
+                        f"with type: {cursor.kind} in file: {self.name}:{cursor.location.line}"
                     )
 
             self.nodes[cursor.spelling] = cursor

@@ -12,7 +12,7 @@ from clang.cindex import Config
 
 from header import Header, HeaderConfig
 from binder import Module
-from generator import generate
+from generator import Generator
 
 parser = ArgumentParser()
 parser.add_argument(
@@ -27,10 +27,34 @@ args = parser.parse_args()
 Config.set_library_path(cast(str, args.clang_lib_path))
 HeaderConfig.set_extra_args(cast(str, args.clang_args))
 
-core_h = Header("rz_core.h")
 rizin = Module("rizin")
-rz_core = rizin.Class(core_h, "rz_core_t", rename="Core")
 
+
+list_h = Header("rz_list.h")
+rz_list_iter = rizin.Generic(
+    list_h,
+    "rz_list_iter_t",
+    ["data", "n", "p"],
+    rename="RzListIter",
+)
+
+rz_list = rizin.Generic(
+    list_h,
+    "rz_list_t",
+    ["head", "tail"],
+    rename="RzList",
+)
+rz_list.add_constructor(list_h, "rz_list_new")
+rz_list.add_constructor(list_h, "rz_list_newf")
+rz_list.add_destructor(list_h, "rz_list_free")
+rz_list.add_prefixed_methods(list_h, "rz_list_")
+
+core_h = Header("rz_core.h")
+
+"""
+rz_core_t
+"""
+rz_core = rizin.Class(core_h, "rz_core_t", rename="RzCore")
 rz_core.add_constructor(core_h, "rz_core_new")
 rz_core.add_destructor(core_h, "rz_core_free")
 
@@ -42,14 +66,8 @@ for func_name in [
     "rz_core_cmd_strf",
     "rz_core_cmdf",
     "rz_core_syscallf",
-    # undefined symbols (?)
-    "rz_core_pseudo_code",
-    "rz_core_echo",
-    "rz_core_config_eval_and_print",
-    "rz_core_item_free",
-    "rz_core_bin_impaddr",
 ]:
-    core_h.used.add(func_name)
+    core_h.used.add(core_h.nodes[func_name])
 
 rz_core.add_prefixed_methods(core_h, "rz_core_")
 rz_core.add_prefixed_funcs(core_h, "rz_core_")
@@ -57,7 +75,7 @@ rz_core.add_prefixed_funcs(core_h, "rz_core_")
 with open(
     os.path.join(cast(str, args.output_dir), "rizin.i"), "w", encoding="utf8"
 ) as output:
-    generate(rizin).write(output)
+    Generator(rizin).write(output)
 
 # Header("rz_bin.h")
 # Header("rz_asm.h")
