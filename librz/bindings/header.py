@@ -36,7 +36,7 @@ class Header:
 
     name: str
     nodes: OrderedDict[str, Cursor]
-    used: Set[Cursor]
+    used: Set[str]
 
     macros: List[Macro]
     vars: List[Var]

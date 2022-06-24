@@ -27,6 +27,7 @@ class BinderFunc:
     func: Func
     name: str
     type: FuncType
+    generic: bool
 
     def __init__(
         self,
@@ -34,10 +35,12 @@ class BinderFunc:
         *,
         rename: Optional[str] = None,
         type_: FuncType = FuncType.FORWARD,
+        generic: bool = False,
     ):
         self.func = func
         self.name = rename or func.spelling
         self.type = type_
+        self.generic = generic
 
 
 class Module:
@@ -81,7 +84,7 @@ class Module:
             func = header.nodes[func_name]
             assert func.kind == CursorKind.FUNCTION_DECL
 
-            header.used.add(func)
+            header.used.add(func.spelling)
             self.funcs.append(BinderFunc(func, rename=rename, type_=type_))
 
         def add_constructor(self, header: Header, func_name: str) -> None:
@@ -113,7 +116,7 @@ class Module:
             """
 
             def predicate(cursor: Func) -> bool:
-                if cursor in header.used:
+                if cursor.spelling in header.used:
                     return False  # not used
                 if not cursor.spelling.startswith(prefix):
                     return False  # correct prefix
@@ -140,7 +143,7 @@ class Module:
                         rename=func.spelling[len(prefix) :],
                     )
                 )
-                header.used.add(func)
+                header.used.add(func.spelling)
 
         def add_prefixed_funcs(self, header: Header, prefix: str) -> None:
             """
@@ -149,7 +152,7 @@ class Module:
             """
 
             def predicate(cursor: Func) -> bool:
-                if cursor in header.used:
+                if cursor.spelling in header.used:
                     return False  # not used
                 if not cursor.spelling.startswith(prefix):
                     return False  # correct prefix
@@ -162,7 +165,7 @@ class Module:
                         rename=func.spelling[len(prefix) :],
                     )
                 )
-                header.used.add(func)
+                header.used.add(func.spelling)
 
     class BinderGeneric(BinderClass):
         generic_fields: List[str]
@@ -178,7 +181,7 @@ class Module:
             super().__init__(header, struct, rename=rename)
             self.generic_fields = generic_fields
 
-        def add_prefixed_funcs_returning(
+        def add_generic_funcs(
             self, header: Header, prefix: str, returning: str
         ) -> None:
             pass
@@ -187,7 +190,7 @@ class Module:
     headers: Set[Header]
     classes: List[BinderClass]
     generics: List[BinderGeneric]
-    generic_structs: Set[Struct]
+    generic_structs: Set[str]
 
     def __init__(self, name: str):
         self.name = name
@@ -232,6 +235,6 @@ class Module:
 
         result = Module.BinderGeneric(header, struct, generic_fields, rename=rename)
         self.generics.append(result)
-        self.generic_structs.add(struct)
+        self.generic_structs.add(struct.spelling)
 
         return result

@@ -67,7 +67,8 @@ for func_name in [
     "rz_core_cmdf",
     "rz_core_syscallf",
 ]:
-    core_h.used.add(core_h.nodes[func_name])
+    assert func_name in core_h.nodes
+    core_h.used.add(func_name)
 
 rz_core.add_prefixed_methods(core_h, "rz_core_")
 rz_core.add_prefixed_funcs(core_h, "rz_core_")

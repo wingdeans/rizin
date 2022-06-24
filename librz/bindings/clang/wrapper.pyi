@@ -2,6 +2,8 @@ from enum import Enum as PyEnum
 import enum
 from typing import Union, Literal, Iterator, final
 
+from clang.cindex import SourceRange, TranslationUnit
+
 """
 Type kinds/base
 """
@@ -72,18 +74,23 @@ class CursorKind(PyEnum):
     ENUM_CONSTANT_DECL: CursorKind
     PARM_DECL: CursorKind
 
+    TYPE_REF: CursorKind
+
 class Token:
     spelling: str
 
+class SourceLocation:
+    class File:
+        name: str
+    file: File
+    line: int
+    column: int
+
 class CursorBase:
-    class SourceLocation:
-        class File:
-            name: str
-        file: File
-        line: int
-        column: int
     location: SourceLocation
+    extent: SourceRange
     spelling: str
+    translation_unit: TranslationUnit
 
 class RootCursor(CursorBase):
     kind: Literal[CursorKind.TRANSLATION_UNIT]
@@ -109,7 +116,8 @@ class Func(CursorBase):
     kind: Literal[CursorKind.FUNCTION_DECL]
     def get_arguments(self) -> Iterator[Cursor]:
         pass
-    # def get_children(self) -> Iterator[Cursor]: pass
+    def get_children(self) -> Iterator[Cursor]:
+        pass
     result_type: Type
 
 class Struct(CursorBase):
@@ -134,16 +142,32 @@ Additional cursors
 class Param(CursorBase):
     kind: Literal[CursorKind.PARM_DECL]
     type: Type
+    def get_children(self) -> Iterator[Cursor]:
+        pass
 
 class StructField(CursorBase):
     kind: Literal[CursorKind.FIELD_DECL]
     type: Type
+    def get_children(self) -> Iterator[Cursor]:
+        pass
 
 class StructUnionField(CursorBase):
     kind: Literal[CursorKind.UNION_DECL]
     def get_children(self) -> Iterator[Cursor]:
         pass
 
+class Typeref(CursorBase):
+    kind: Literal[CursorKind.TYPE_REF]
+
 Cursor = Union[
-    Macro, Var, Func, Struct, Enum, Typedef, Param, StructField, StructUnionField
+    Macro,
+    Var,
+    Func,
+    Struct,
+    Enum,
+    Typedef,
+    Param,
+    StructField,
+    StructUnionField,
+    Typeref,
 ]

@@ -1750,7 +1750,8 @@ class Cursor(Structure):
 
         return self._objc_type_encoding
 
-    def __hash__(self):
+    @property
+    def hash(self):
         """Returns a hash of the cursor as an int."""
         if not hasattr(self, '_hash'):
             self._hash = conf.lib.clang_hashCursor(self)

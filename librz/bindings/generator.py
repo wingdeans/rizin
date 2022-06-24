@@ -15,6 +15,7 @@ from clang.wrapper import (
     Type,
     Cursor,
 )
+from clang.cindex import SourceRange
 
 from binder import Module, BinderFunc, FuncType
 
@@ -77,17 +78,114 @@ class Generator:
 
         self.generate_module()
 
+    def generate_module(self) -> None:
+        """
+        %module ...
+        %{
+        #include <...>
+        #include <...>
+        %}
+        """
+        writer = self.header
+
+        self.main.line("%module $name", name=self.module.name)
+        self.main.line("%{")
+        for header in self.module.headers:
+            self.main.line("#include <$header>", header=header.name)
+        self.main.line("%}")
+
+        for generic in self.module.generics:
+            self.generate_generic(generic)
+
+        for cls in self.module.classes:
+            self.generate_class(cls)
+
+    def generate_generic(self, cls: Module.BinderGeneric) -> None:
+        """
+        %define %rz_list_t_generic(TYPE)
+        typedef struct {} rz_list_t_##TYPE;
+        %extend rz_list_t_##TYPE {
+        ...
+        }
+        %enddef
+        """
+        writer = self.generic
+
+        writer.line("%define %${name}_generic(TYPE)", name=cls.struct.spelling)
+        with writer.indent():
+            writer.line("typedef struct {} ${name}_##TYPE;", name=cls.struct.spelling)
+            writer.line("%extend ${name}_##TYPE {", name=cls.struct.spelling)
+            with writer.indent():
+                self.generate_struct_fields(cls.struct, generic=True)
+            writer.line("}")
+        writer.line("%enddef")
+
+    def generate_class(self, cls: Module.BinderClass) -> None:
+        """
+        struct ... {
+        };
+
+        %extend ... {
+        };
+        """
+        writer = self.main
+
+        self.generate_struct(cls.struct, generic=False)
+
+        if cls.rename:
+            writer.line("%rename ($new) $old;", new=cls.rename, old=cls.struct.spelling)
+        writer.line("%extend $struct {", struct=cls.struct.spelling)
+        with writer.indent():
+            for func in cls.funcs:
+                self.generate_func(func)
+        writer.line("};")
+
+    def generate_struct_fields(self, struct: Struct, *, generic: bool) -> None:
+        writer = self.generic if generic else self.main
+
+        def generate_field(field: StructField) -> None:
+            writer.line(
+                "$decl;", decl=self.stringify_decl(field, field.type, generic=generic)
+            )
+
+        def generate_union(field: StructUnionField) -> None:
+            writer.line("union {")
+            with writer.indent():
+                for union_field in field.get_children():
+                    assert union_field.kind == CursorKind.FIELD_DECL
+                    generate_field(union_field)
+                writer.line("} $name;", name=field.spelling)
+
+        for field in struct.get_children():
+            if field.kind == CursorKind.STRUCT_DECL:
+                self.generate_struct(field, generic=generic)
+            elif field.kind == CursorKind.UNION_DECL:
+                generate_union(field)
+            elif field.kind == CursorKind.FIELD_DECL:
+                generate_field(field)
+            else:
+                raise Exception(f"Unexpected struct child of kind: {field.kind}")
+
+    def generate_struct(self, struct: Struct, *, generic: bool) -> None:
+        writer = self.generic if generic else self.main
+
+        writer.line("struct $name {", name=struct.spelling)
+        with writer.indent():
+            self.generate_struct_fields(struct, generic=generic)
+        writer.line("};")
+
     def write(self, output: TextIO) -> None:
         self.header.write(output)
         self.generic.write(output)
         self.main.write(output)
 
-    def stringify_decl(self, cursor: Cursor, type_: Type) -> str:
+    def stringify_decl(self, cursor: Cursor, type_: Type, *, generic: bool) -> str:
         name = cursor.spelling
+        pointers = ""
 
         while type_.kind == TypeKind.POINTER:
             type_ = type_.get_pointee()
-            name = "*" + name
+            pointers += "*"
 
         if type_.kind == TypeKind.CONSTANTARRAY:
             name = f"{name}[{type_.element_count}]"
@@ -100,37 +198,32 @@ class Generator:
             name = f"({name})({args})"
             type_ = type_.get_result()
 
-        if type_.get_canonical().get_declaration() in self.module.generic_structs:
-            pass
+        decl = type_.get_canonical().get_declaration()
+        if decl.spelling in self.module.generic_structs:
+            if generic:
+                name = f"{name}_##TYPE"
+            else:
+                assert cursor.kind in [
+                    CursorKind.FIELD_DECL,
+                    CursorKind.FUNCTION_DECL,
+                    CursorKind.PARM_DECL,
+                ]
+                typerefs = [
+                    child
+                    for child in cursor.get_children()
+                    if child.kind == CursorKind.TYPE_REF
+                ]
+                assert len(typerefs) == 1
+                src_range = SourceRange.from_locations(
+                    typerefs[0].extent.end, cursor.location
+                )
+                token = next(
+                    cursor.translation_unit.get_tokens(extent=src_range)
+                ).spelling
+                if not (token.startswith("/*") and token.endswith("*/")):
+                    print(cursor.location)
 
-        return f"{type_.spelling} {name}"
-
-    def generate_field(self, field: StructField) -> None:
-        self.main.line("$decl;", decl=self.stringify_decl(field, field.type))
-
-    def generate_struct(self, struct: Struct) -> None:
-        writer = self.main
-
-        def generate_union(field: StructUnionField) -> None:
-            writer.line("union {")
-            with writer.indent():
-                for union_field in field.get_children():
-                    assert union_field.kind == CursorKind.FIELD_DECL
-                    self.generate_field(union_field)
-                writer.line("} $name;", name=field.spelling)
-
-        writer.line("struct $name {", name=struct.spelling)
-        with writer.indent():
-            for field in struct.get_children():
-                if field.kind == CursorKind.STRUCT_DECL:
-                    self.generate_struct(field)
-                elif field.kind == CursorKind.UNION_DECL:
-                    generate_union(field)
-                elif field.kind == CursorKind.FIELD_DECL:
-                    self.generate_field(field)
-                else:
-                    raise Exception(f"Unexpected struct child of kind: {field.kind}")
-        writer.line("};")
+        return f"{type_.spelling} {pointers}{name}"
 
     def generate_func(self, binder_func: BinderFunc) -> None:
         writer = self.main
@@ -139,7 +232,9 @@ class Generator:
         for arg in binder_func.func.get_arguments():
             assert arg.kind == CursorKind.PARM_DECL
             args_inner.append(arg.spelling)
-            args_outer.append(self.stringify_decl(arg, arg.type))
+            args_outer.append(
+                self.stringify_decl(arg, arg.type, generic=binder_func.generic)
+            )
 
         if binder_func.type in [FuncType.THIS, FuncType.DESTRUCTOR]:
             args_outer = args_outer[1:]  # don't accept first argument
@@ -156,7 +251,9 @@ class Generator:
                 "$visibility$decl($args) {",
                 visibility="" if binder_func.type == FuncType.THIS else "static ",
                 decl=self.stringify_decl(
-                    binder_func.func, binder_func.func.result_type
+                    binder_func.func,
+                    binder_func.func.result_type,
+                    generic=binder_func.generic,
                 ),
                 args=args_outer_str,
             )
@@ -168,58 +265,3 @@ class Generator:
                 args=", ".join(args_inner),
             )
         writer.line("}")
-
-    def generate_generic(self, cls: Module.BinderGeneric) -> None:
-        writer = self.generic
-
-        writer.line("%define %${name}_generic(TYPE)", name=cls.struct.spelling)
-        with writer.indent():
-            writer.line("typedef struct {} ${name}_##TYPE;", name=cls.struct.spelling)
-            writer.line("%extend ${name}_##TYPE {", name=cls.struct.spelling)
-            with writer.indent():
-                for field in cls.struct.get_children():
-                    assert field.kind == CursorKind.FIELD_DECL
-
-            writer.line("}")
-        writer.line("%enddef")
-
-    def generate_class(self, cls: Module.BinderClass) -> None:
-        """
-        struct ... {
-        };
-
-        %extend ... {
-        };
-        """
-        writer = self.main
-
-        self.generate_struct(cls.struct)
-
-        if cls.rename:
-            writer.line("%rename ($new) $old;", new=cls.rename, old=cls.struct.spelling)
-        writer.line("%extend $struct {", struct=cls.struct.spelling)
-        with self.generic.indent():
-            for func in cls.funcs:
-                self.generate_func(func)
-        writer.line("};")
-
-    def generate_module(self) -> None:
-        """
-        %module ...
-        %{
-        #include <...>
-        #include <...>
-        %}
-        """
-        writer = self.header
-        self.main.line("%module $name", name=self.module.name)
-        self.main.line("%{")
-        for header in self.module.headers:
-            self.main.line("#include <$header>", header=header.name)
-        self.main.line("%}")
-
-        for generic in self.module.generics:
-            self.generate_generic(generic)
-
-        for cls in self.module.classes:
-            self.generate_class(cls)
