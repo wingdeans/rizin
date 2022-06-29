@@ -12,7 +12,6 @@ from clang.cindex import Config
 
 from header import Header, HeaderConfig
 from binder import Module
-from generator import Generator
 
 parser = ArgumentParser()
 parser.add_argument(
@@ -29,37 +28,30 @@ HeaderConfig.set_extra_args(cast(str, args.clang_args))
 
 rizin = Module("rizin")
 
-
+"""
+RzListIter, RzList
+"""
 list_h = Header("rz_list.h")
-rz_list_iter = rizin.Generic(
-    list_h,
-    "rz_list_iter_t",
-    ["data", "n", "p"],
-    rename="RzListIter",
-)
-
-rz_list = rizin.Generic(
-    list_h,
-    "rz_list_t",
-    ["head", "tail"],
-    rename="RzList",
-)
+rz_list = rizin.Generic(list_h, "RzList")
 rz_list.add_constructor(list_h, "rz_list_new")
-rz_list.add_constructor(list_h, "rz_list_newf")
 rz_list.add_destructor(list_h, "rz_list_free")
-rz_list.add_prefixed_methods(list_h, "rz_list_")
 
-core_h = Header("rz_core.h")
+vector_h = Header("rz_vector.h")
+rz_vector = rizin.Generic(vector_h, "RzVector")
+rz_pvector = rizin.Generic(vector_h, "RzPVector")
 
 """
 rz_core_t
 """
-rz_core = rizin.Class(core_h, "rz_core_t", rename="RzCore")
+core_h = Header("rz_core.h")
+rizin.headers.add(Header("rz_cmp.h"))  # RzCoreCmpWatcher
+rz_core = rizin.Class(core_h, "RzCore")
 rz_core.add_constructor(core_h, "rz_core_new")
 rz_core.add_destructor(core_h, "rz_core_free")
+rz_core_file = rizin.Class(core_h, "RzCoreFile")
 
+# Ignore format strings
 for func_name in [
-    # ignore format strings
     "rz_core_notify_begin",
     "rz_core_notify_done",
     "rz_core_notify_error",
@@ -73,10 +65,20 @@ for func_name in [
 rz_core.add_prefixed_methods(core_h, "rz_core_")
 rz_core.add_prefixed_funcs(core_h, "rz_core_")
 
+"""
+rz_bin_t
+"""
+bin_h = Header("rz_bin.h")
+rz_bin = rizin.Class(bin_h, "RzBin")
+rz_bin.add_prefixed_methods(bin_h, "rz_bin_")
+rz_bin.add_prefixed_funcs(bin_h, "rz_bin_")
+rz_bin_options = rizin.Class(bin_h, "RzBinOptions")
+rz_bin_info = rizin.Class(bin_h, "RzBinInfo")
+
 with open(
     os.path.join(cast(str, args.output_dir), "rizin.i"), "w", encoding="utf8"
 ) as output:
-    Generator(rizin).write(output)
+    rizin.write(output)
 
 # Header("rz_bin.h")
 # Header("rz_asm.h")

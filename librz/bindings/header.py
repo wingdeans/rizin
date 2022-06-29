@@ -22,7 +22,7 @@ class HeaderConfig:
             ["..", "..", "subprojects", "sdb", "src"],
             ["..", "..", "build"],
         ]
-    ]
+    ] + ["-DRZ_BINDINGS"]
 
     @staticmethod
     def set_extra_args(extra_args: str) -> None:
@@ -38,16 +38,17 @@ class Header:
     nodes: OrderedDict[str, Cursor]
     used: Set[str]
 
-    macros: List[Macro]
-    vars: List[Var]
-    funcs: List[Func]
-    structs: List[Struct]
-    enums: List[Enum]
-    typedefs: List[Typedef]
+    # Specific node types
+    macros: OrderedDict[str, Macro]
+    variables: OrderedDict[str, Var]
+    funcs: OrderedDict[str, Func]
+    structs: OrderedDict[str, Struct]
+    enums: OrderedDict[str, Enum]
+    typedefs: OrderedDict[str, Typedef]
 
-    def __init__(self, name: str) -> None:
-        self.name = name
-        filename = os.path.join(os.path.dirname(__file__), "..", "include", name)
+    def __init__(self, headername: str) -> None:
+        self.name = headername
+        filename = os.path.join(os.path.dirname(__file__), "..", "include", headername)
 
         try:
             translation_unit = TranslationUnit.from_source(
@@ -69,12 +70,12 @@ class Header:
         self.used = set()
         self.nodes = OrderedDict()
 
-        self.macros = []
-        self.vars = []
-        self.funcs = []
-        self.structs = []
-        self.enums = []
-        self.typedefs = []
+        self.macros = OrderedDict()
+        self.variables = OrderedDict()
+        self.funcs = OrderedDict()
+        self.structs = OrderedDict()
+        self.enums = OrderedDict()
+        self.typedefs = OrderedDict()
 
         for cursor in translation_unit.cursor.get_children():
             # Skip nodes from other headers
@@ -88,29 +89,9 @@ class Header:
             ]:
                 continue
 
-            if cursor.kind == CursorKind.MACRO_DEFINITION:
-                self.macros.append(cursor)
-            elif cursor.kind == CursorKind.VAR_DECL:
-                self.vars.append(cursor)
-            elif cursor.kind == CursorKind.FUNCTION_DECL:
-                self.funcs.append(cursor)
-            elif cursor.kind == CursorKind.STRUCT_DECL:
-                self.structs.append(cursor)
-            elif cursor.kind == CursorKind.ENUM_DECL:
-                self.enums.append(cursor)
-            elif cursor.kind == CursorKind.TYPEDEF_DECL:
-                self.typedefs.append(cursor)
-
-            # REMOVE
-            elif cursor.kind in [CursorKind.UNION_DECL]:
-                pass
-            else:
-                raise Exception(
-                    f"Unexpected toplevel node of kind: {str(cursor.kind)} in file: {self.name}"
-                )
-
-            # Add to nodes OrderedDict
-            if not cursor.spelling:
+            # Rename anonymous declarations and check for redefinitions
+            name = cursor.spelling
+            if not name:
                 name = f"anonymous_node_{len(self.nodes)}"
             elif cursor.spelling in self.nodes:  # Redefinition
                 if cursor.kind == CursorKind.STRUCT_DECL:
@@ -120,7 +101,26 @@ class Header:
                 else:
                     raise Exception(
                         f"Unexpected redefinition of symbol: {cursor.spelling}, "
-                        f"with type: {cursor.kind} in file: {self.name}:{cursor.location.line}"
+                        f"with type: {cursor.kind} in header: {headername}:{cursor.location.line}"
                     )
 
+            # Add to nodes OrderedDict
             self.nodes[cursor.spelling] = cursor
+
+            # Add to specific node kind OrderedDict
+            if cursor.kind == CursorKind.MACRO_DEFINITION:
+                self.macros[name] = cursor
+            elif cursor.kind == CursorKind.VAR_DECL:
+                self.variables[name] = cursor
+            elif cursor.kind == CursorKind.FUNCTION_DECL:
+                self.funcs[name] = cursor
+            elif cursor.kind == CursorKind.STRUCT_DECL:
+                self.structs[name] = cursor
+            elif cursor.kind == CursorKind.ENUM_DECL:
+                self.enums[name] = cursor
+            elif cursor.kind == CursorKind.TYPEDEF_DECL:
+                self.typedefs[name] = cursor
+            else:
+                raise Exception(
+                    f"Unexpected toplevel node of kind: {str(cursor.kind)} in file: {self.name}"
+                )

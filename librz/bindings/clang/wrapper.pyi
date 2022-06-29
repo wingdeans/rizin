@@ -15,6 +15,8 @@ class TypeKind(PyEnum):
     INCOMPLETEARRAY: TypeKind
     POINTER: TypeKind
     FUNCTIONPROTO: TypeKind
+    VOID: TypeKind
+    BOOL: TypeKind
 
 class TypeBase:
     spelling: str
@@ -48,7 +50,13 @@ class FuncType(TypeBase):
     def argument_types(self) -> Iterator[Type]:
         pass
 
-Type = Union[Array, IncompleteArray, Pointer, FuncType]
+class Void(TypeBase):
+    kind: Literal[TypeKind.VOID]
+
+class Bool(TypeBase):
+    kind: Literal[TypeKind.BOOL]
+    
+Type = Union[Array, IncompleteArray, Pointer, FuncType, Void, Bool]
 
 """
 Cursor kinds/base
@@ -75,6 +83,7 @@ class CursorKind(PyEnum):
     PARM_DECL: CursorKind
 
     TYPE_REF: CursorKind
+    ANNOTATE_ATTR: CursorKind
 
 class Token:
     spelling: str
@@ -159,6 +168,9 @@ class StructUnionField(CursorBase):
 class Typeref(CursorBase):
     kind: Literal[CursorKind.TYPE_REF]
 
+class AnnotateAttr(CursorBase):
+    kind: Literal[CursorKind.ANNOTATE_ATTR]
+    
 Cursor = Union[
     Macro,
     Var,
@@ -170,4 +182,5 @@ Cursor = Union[
     StructField,
     StructUnionField,
     Typeref,
+    AnnotateAttr
 ]

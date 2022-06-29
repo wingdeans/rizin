@@ -1,196 +1,25 @@
-"""
-Helper classes to construct bindings
-"""
-from enum import Enum
-from typing import List, Set, Optional, Dict
+from typing import List, Set, Optional, Tuple, Dict, TextIO
 
-from clang.wrapper import TypeKind, CursorKind, Cursor, Struct, Func
+from clang.cindex import SourceRange
+from clang.wrapper import Type, TypeKind, Cursor, CursorKind
+
 from header import Header
+from fragment import Fragment
 
-
-class FuncType(Enum):
-    """
-    Represents the type of a wrapped function
-    """
-
-    FORWARD = 0  # Every argument is unchanged (default)
-    THIS = 1  # Uses a class instance's `this` as the first argument
-    CONSTRUCTOR = 2
-    DESTRUCTOR = 3
-
-
-class BinderFunc:
-    """
-    Represents a function in the guest language
-    """
-
-    func: Func
-    name: str
-    type: FuncType
-    generic: bool
-
-    def __init__(
-        self,
-        func: Func,
-        *,
-        rename: Optional[str] = None,
-        type_: FuncType = FuncType.FORWARD,
-        generic: bool = False,
-    ):
-        self.func = func
-        self.name = rename or func.spelling
-        self.type = type_
-        self.generic = generic
+from binder_class import BinderClass
+from binder_generic import BinderGeneric
 
 
 class Module:
-    """
-    Represents a module in the guest language
-    Can contain multiple classes from different headers
-    """
-
-    class BinderClass:
-        """
-        Represents a class in the guest language
-        Can contain class and instance methods
-        """
-
-        struct: Struct
-        rename: Optional[str]
-        funcs: List[BinderFunc]
-
-        def __init__(
-            self,
-            header: Header,
-            struct: Struct,
-            *,
-            rename: Optional[str] = None,
-        ):
-            self.rename = rename
-            self.struct = struct
-            self.funcs = []
-
-        def add_func(
-            self,
-            header: Header,
-            func_name: str,
-            *,
-            rename: Optional[str] = None,
-            type_: FuncType = FuncType.FORWARD,
-        ) -> None:
-            """
-            Add function to class
-            """
-            func = header.nodes[func_name]
-            assert func.kind == CursorKind.FUNCTION_DECL
-
-            header.used.add(func.spelling)
-            self.funcs.append(BinderFunc(func, rename=rename, type_=type_))
-
-        def add_constructor(self, header: Header, func_name: str) -> None:
-            """
-            Add a constructor function for the class
-            """
-            self.add_func(
-                header,
-                func_name,
-                rename=self.struct.spelling,
-                type_=FuncType.CONSTRUCTOR,
-            )
-
-        def add_destructor(self, header: Header, func_name: str) -> None:
-            """
-            Add a destructor function for the class
-            """
-            self.add_func(
-                header,
-                func_name,
-                rename="~" + self.struct.spelling,
-                type_=FuncType.DESTRUCTOR,
-            )
-
-        def add_prefixed_methods(self, header: Header, prefix: str) -> None:
-            """
-            Add all functions in the header which match the specified prefix
-            and take in a pointer to the class as their first argument
-            """
-
-            def predicate(cursor: Func) -> bool:
-                if cursor.spelling in header.used:
-                    return False  # not used
-                if not cursor.spelling.startswith(prefix):
-                    return False  # correct prefix
-
-                args = list(cursor.get_arguments())
-                if len(args) == 0:
-                    return False
-
-                arg = args[0]
-                assert arg.kind == CursorKind.PARM_DECL
-
-                if arg.type.kind != TypeKind.POINTER:
-                    return False
-                return (
-                    arg.type.get_pointee().get_canonical().get_declaration()
-                    == self.struct
-                )
-
-            for func in filter(predicate, header.funcs):
-                self.funcs.append(
-                    BinderFunc(
-                        func,
-                        type_=FuncType.THIS,
-                        rename=func.spelling[len(prefix) :],
-                    )
-                )
-                header.used.add(func.spelling)
-
-        def add_prefixed_funcs(self, header: Header, prefix: str) -> None:
-            """
-            Add all functions in the header which match the specified prefix
-            as static methods of the class
-            """
-
-            def predicate(cursor: Func) -> bool:
-                if cursor.spelling in header.used:
-                    return False  # not used
-                if not cursor.spelling.startswith(prefix):
-                    return False  # correct prefix
-                return True
-
-            for func in filter(predicate, header.funcs):
-                self.funcs.append(
-                    BinderFunc(
-                        func,
-                        rename=func.spelling[len(prefix) :],
-                    )
-                )
-                header.used.add(func.spelling)
-
-    class BinderGeneric(BinderClass):
-        generic_fields: List[str]
-
-        def __init__(
-            self,
-            header: Header,
-            struct: Struct,
-            generic_fields: List[str],
-            *,
-            rename: Optional[str] = None,
-        ):
-            super().__init__(header, struct, rename=rename)
-            self.generic_fields = generic_fields
-
-        def add_generic_funcs(
-            self, header: Header, prefix: str, returning: str
-        ) -> None:
-            pass
-
     name: str
     headers: Set[Header]
+
     classes: List[BinderClass]
+
     generics: List[BinderGeneric]
-    generic_structs: Set[str]
+    generic_names: Dict[str, str]  # maps struct name -> generic name
+    generic_specializations: Fragment
+    generic_specializations_set: Set[Tuple[str, str]]
 
     def __init__(self, name: str):
         self.name = name
@@ -198,43 +27,138 @@ class Module:
         self.classes = []
 
         self.generics = []
-        self.generic_structs = set()
+        self.generic_names = {}
+        self.generic_specializations = Fragment()
+        self.generic_specializations_set = set()
 
-    def Class(
-        self,
-        header: Header,
-        struct_name: str,
-        *,
-        rename: Optional[str] = None,
-    ) -> BinderClass:
-        """
-        Create a class from a struct in the given header
-        """
+    def Class(self, header: Header, name: str) -> BinderClass:
         self.headers.add(header)
 
-        struct = header.nodes[struct_name]
-        assert struct.kind == CursorKind.STRUCT_DECL
-
-        result = Module.BinderClass(header, struct, rename=rename)
+        result = BinderClass(self, header.typedefs[name])
         self.classes.append(result)
-
         return result
 
-    def Generic(
-        self,
-        header: Header,
-        struct_name: str,
-        generic_fields: List[str],
-        *,
-        rename: Optional[str] = None,
-    ) -> BinderClass:
+    def Generic(self, header: Header, name: str) -> BinderGeneric:
         self.headers.add(header)
+        typedef = header.typedefs[name]
+        struct = typedef.underlying_typedef_type.get_declaration()
+        self.generic_names[struct.spelling] = name
 
-        struct = header.nodes[struct_name]
-        assert struct.kind == CursorKind.STRUCT_DECL
-
-        result = Module.BinderGeneric(header, struct, generic_fields, rename=rename)
+        result = BinderGeneric(self, typedef)
         self.generics.append(result)
-        self.generic_structs.add(struct.spelling)
-
         return result
+
+    def get_generic_name(self, type_: Type) -> Optional[str]:
+        while type_.kind == TypeKind.POINTER:
+            type_ = type_.get_pointee()
+
+        name = type_.get_canonical().get_declaration().spelling
+        if name in self.generic_names:
+            return self.generic_names[name]
+        return None
+
+    def add_generic_specialization(self, cursor: Cursor, generic_name: str) -> str:
+        # Extract generic /*<type>*/ comment
+        assert (
+            cursor.kind == CursorKind.FIELD_DECL
+            or cursor.kind == CursorKind.FUNCTION_DECL
+            or cursor.kind == CursorKind.PARM_DECL
+        )
+
+        typeref = next(
+            child
+            for child in cursor.get_children()
+            if child.kind == CursorKind.TYPE_REF
+        )
+        src_range = SourceRange.from_locations(typeref.extent.end, cursor.location)
+        token = next(cursor.translation_unit.get_tokens(extent=src_range)).spelling
+
+        if not token.startswith("/*<") or not token.endswith(">*/"):
+            raise Exception(
+                f"{generic_name} at {cursor.location} lacks /*<type>*/ annotation"
+            )
+        name = token[3:-3]
+
+        # Generics of type char* screw up tokenization
+        if name == "char*":
+            name = "String"
+
+        # Add to specializations
+        mapping = (generic_name, name)
+        if mapping not in self.generic_specializations_set:
+            self.generic_specializations.line(f"%{generic_name}({name})")
+            self.generic_specializations_set.add(mapping)
+        return name
+
+    def stringify_decl(
+        self,
+        cursor: Cursor,
+        type_: Type,
+        *,
+        name: Optional[str] = None,
+        generic: bool = False,
+    ) -> str:
+        """
+        Combine a name and a type to form a declaration string
+        eg. (anArray, int[10]) -> "int anArray[10]"
+        eg. (aFunctionPointer, (*int)(int a, int b)) -> "int (*aFunctionPointer)(int a, int b)"
+
+        If the type is generic, get the inner type from the comment
+        and generate the correct specialization
+
+        If being called from a generic %define, use ##TYPE as the
+        inner type
+        """
+
+        # Get generic typename if applicable
+        generic_name = self.get_generic_name(type_)
+        if generic_name:  # Is generic type?
+            if generic:
+                type_name = f"{generic_name}_##TYPE"
+            else:
+                type_name = f"{generic_name}_{self.add_generic_specialization(cursor, generic_name)}"
+        else:
+            type_name = None
+
+        name = name or cursor.spelling
+
+        while type_.kind == TypeKind.POINTER:
+            type_ = type_.get_pointee()
+            name = "*" + name
+
+        # Reorder array and function pointer declarations
+        if type_.kind == TypeKind.CONSTANTARRAY:
+            name = f"{name}[{type_.element_count}]"
+            type_ = type_.element_type
+        elif type_.kind == TypeKind.INCOMPLETEARRAY:
+            name = f"{name}[]"
+            type_ = type_.element_type
+        elif type_.kind == TypeKind.FUNCTIONPROTO:
+            args = ", ".join(arg.spelling for arg in type_.argument_types())
+            name = f"({name})({args})"
+            type_ = type_.get_result()
+        elif type_.kind == TypeKind.BOOL:
+            type_name = "bool"  # _Bool -> bool
+
+        return f"{type_name or type_.spelling} {name}"
+
+    def write(self, output: TextIO) -> None:
+        frag = Fragment()
+        frag.line(f"%module {self.name}")
+        frag.line("%{")
+        for header in self.headers:
+            frag.line(f"#include <{header.name}>")
+        frag.line("%}")
+
+        # Generics of type char* screw up tokenization
+        frag.line("%{")
+        frag.line("typedef char* String;")
+        frag.line("%}")
+
+        for generic in self.generics:
+            frag.merge(generic.fragment())
+        frag.merge(self.generic_specializations)
+        for cls in self.classes:
+            frag.merge(cls.fragment())
+
+        frag.write(output)
