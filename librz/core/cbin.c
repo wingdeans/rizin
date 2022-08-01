@@ -4883,7 +4883,7 @@ RZ_API bool rz_core_bin_dwarf_print(RzCore *core, RzBinFile *bf, RzCmdStateOutpu
 	return bin_dwarf(core, bf, state);
 }
 
-RZ_API char *rz_core_bin_pdb_get_filename(RzCore *core) {
+RZ_API RZ_OWN char *rz_core_bin_pdb_get_filename(RzCore *core) {
 	RzBinInfo *info = rz_bin_get_info(core->bin);
 	/* Autodetect local file */
 	if (!info || !info->debug_file_name) {

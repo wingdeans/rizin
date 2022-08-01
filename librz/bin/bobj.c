@@ -771,7 +771,7 @@ static RzList *get_sections_or_segment(RzBinObject *obj, bool is_segment) {
 /**
  * \brief Get list of \p RzBinSection representing only the sections of the binary object.
  */
-RZ_API RzList *rz_bin_object_get_sections(RzBinObject *obj) {
+RZ_API RZ_OWN RzList *rz_bin_object_get_sections(RzBinObject *obj) {
 	rz_return_val_if_fail(obj, NULL);
 	return get_sections_or_segment(obj, false);
 }
@@ -779,7 +779,7 @@ RZ_API RzList *rz_bin_object_get_sections(RzBinObject *obj) {
 /**
  * \brief Get list of \p RzBinSection representing only the segments of the binary object.
  */
-RZ_API RzList *rz_bin_object_get_segments(RzBinObject *obj) {
+RZ_API RZ_OWN RzList *rz_bin_object_get_segments(RzBinObject *obj) {
 	rz_return_val_if_fail(obj, NULL);
 	return get_sections_or_segment(obj, true);
 }
@@ -1033,7 +1033,7 @@ RZ_API ut64 rz_bin_object_v2p(RzBinObject *obj, ut64 vaddr) {
  *
  * \return  On success returns a valid pointer, otherwise NULL
  */
-RZ_API RZ_OWN RzBinStrDb *rz_bin_string_database_new(RZ_NULLABLE RzList /*<RzBinString *>*/ *list) {
+RZ_API RZ_OWN RzBinStrDb *rz_bin_string_database_new(RZ_NULLABLE RZ_OWN RzList /*<RzBinString *>*/ *list) {
 	RzBinStrDb *db = RZ_NEW0(RzBinStrDb);
 	if (!db) {
 		RZ_LOG_ERROR("rz_bin: Cannot allocate RzBinStrDb\n");

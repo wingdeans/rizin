@@ -101,7 +101,7 @@ static HashCfgConfig *hash_cfg_config_new(const RzHashPlugin *plugin) {
 	return mdc;
 }
 
-RZ_API const RzHashPlugin *rz_hash_plugin_by_index(RZ_NONNULL RzHash *rh, size_t index) {
+RZ_API RZ_BORROW const RzHashPlugin *rz_hash_plugin_by_index(RZ_NONNULL RzHash *rh, size_t index) {
 	rz_return_val_if_fail(rh, NULL);
 
 	RzListIter *it;
@@ -117,7 +117,7 @@ RZ_API const RzHashPlugin *rz_hash_plugin_by_index(RZ_NONNULL RzHash *rh, size_t
 	return NULL;
 }
 
-RZ_API const RzHashPlugin *rz_hash_plugin_by_name(RZ_NONNULL RzHash *rh, const char *name) {
+RZ_API RZ_BORROW const RzHashPlugin *rz_hash_plugin_by_name(RZ_NONNULL RzHash *rh, const char *name) {
 	rz_return_val_if_fail(name && rh, NULL);
 
 	RzListIter *it;
@@ -131,7 +131,7 @@ RZ_API const RzHashPlugin *rz_hash_plugin_by_name(RZ_NONNULL RzHash *rh, const c
 	return NULL;
 }
 
-RZ_API RzHashCfg *rz_hash_cfg_new(RZ_NONNULL RzHash *rh) {
+RZ_API RZ_OWN RzHashCfg *rz_hash_cfg_new(RZ_NONNULL RzHash *rh) {
 	rz_return_val_if_fail(rh, NULL);
 
 	RzHashCfg *md = RZ_NEW0(RzHashCfg);
@@ -158,7 +158,7 @@ RZ_API RzHashCfg *rz_hash_cfg_new(RZ_NONNULL RzHash *rh) {
  * with the given algorithm and runs also the algo init.
  * when fails to allocate or configure or initialize, returns NULL.
  * */
-RZ_API RzHashCfg *rz_hash_cfg_new_with_algo(RZ_NONNULL RzHash *rh, const char *name, const ut8 *key, ut64 key_size) {
+RZ_API RZ_OWN RzHashCfg *rz_hash_cfg_new_with_algo(RZ_NONNULL RzHash *rh, const char *name, const ut8 *key, ut64 key_size) {
 	rz_return_val_if_fail(rh && name, NULL);
 	RzHashCfg *md = rz_hash_cfg_new(rh);
 	if (!md) {
@@ -442,7 +442,7 @@ RZ_API bool rz_hash_cfg_iterate(RzHashCfg *md, size_t iterate) {
  * RzHashCfg contains a list of configurations; this method will search
  * for the configuration with the given name and if found return the digest value.
  * */
-RZ_API const ut8 *rz_hash_cfg_get_result(RzHashCfg *md, const char *name, ut32 *size) {
+RZ_API RZ_BORROW const ut8 *rz_hash_cfg_get_result(RzHashCfg *md, const char *name, ut32 *size) {
 	rz_return_val_if_fail(md && name && hash_cfg_has_finshed(md), false);
 
 	RzListIter *it = rz_list_find(md->configurations, name, hash_cfg_config_compare);
@@ -466,7 +466,7 @@ RZ_API const ut8 *rz_hash_cfg_get_result(RzHashCfg *md, const char *name, ut32 *
  * RzHashCfg contains a list of configurations; this method will search
  * for the configuration with the given name and if found return the digest value.
  * */
-RZ_API char *rz_hash_cfg_get_result_string(RzHashCfg *md, const char *name, ut32 *size, bool invert) {
+RZ_API RZ_OWN char *rz_hash_cfg_get_result_string(RzHashCfg *md, const char *name, ut32 *size, bool invert) {
 	rz_return_val_if_fail(md && name && hash_cfg_has_finshed(md), false);
 
 	ut32 pos = 0;
@@ -526,7 +526,7 @@ RZ_API RzHashSize rz_hash_cfg_size(RzHashCfg *md, const char *name) {
  *
  * Returns the digest size of the initialized configuration.
  * */
-RZ_API ut8 *rz_hash_cfg_calculate_small_block(RZ_NONNULL RzHash *rh, const char *name, const ut8 *buffer, ut64 bsize, RzHashSize *osize) {
+RZ_API RZ_OWN ut8 *rz_hash_cfg_calculate_small_block(RZ_NONNULL RzHash *rh, const char *name, const ut8 *buffer, ut64 bsize, RzHashSize *osize) {
 	rz_return_val_if_fail(rh && name && buffer, NULL);
 
 	ut8 *result = NULL;
@@ -542,7 +542,7 @@ RZ_API ut8 *rz_hash_cfg_calculate_small_block(RZ_NONNULL RzHash *rh, const char 
 	return result;
 }
 
-RZ_API char *rz_hash_cfg_calculate_small_block_string(RZ_NONNULL RzHash *rh, const char *name, const ut8 *buffer, ut64 bsize, ut32 *size, bool invert) {
+RZ_API RZ_OWN char *rz_hash_cfg_calculate_small_block_string(RZ_NONNULL RzHash *rh, const char *name, const ut8 *buffer, ut64 bsize, ut32 *size, bool invert) {
 	rz_return_val_if_fail(rh && name && buffer, NULL);
 
 	ut32 pos = 0;
