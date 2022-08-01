@@ -1,7 +1,8 @@
 #ifndef RZ_HEAP_GLIBC_H
 #define RZ_HEAP_GLIBC_H
 
-#include <rz_core.h>
+#include <rz_types.h>
+#include <rz_list.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -302,6 +303,8 @@ typedef struct rz_heap_bin {
 	RzList *chunks; /* list of chunks in the bins */
 	char *message; /* indicating the list is corrupted or double free*/
 } RzHeapBin;
+
+typedef struct rz_core_t RzCore;
 
 RZ_API RzHeapChunkSimple *rz_heap_chunk_wrapper_32(RzCore *core, ut32 addr);
 RZ_API RzHeapChunkSimple *rz_heap_chunk_wrapper_64(RzCore *core, ut64 addr);
